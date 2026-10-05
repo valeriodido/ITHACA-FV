@@ -17,6 +17,7 @@ ITHACAutilities/ITHACAstring.C
 ITHACAparallel/ITHACAparallel.C
 ITHACAutilities/ITHACAforces.C
 ITHACAutilities/ITHACAsurfacetools.C
+ITHACAPOD/GappyPOD.C
 ITHACAPOD/incrementalPOD.C
 ITHACAPOD/ITHACAPOD.C
 ITHACAPOD/PODTemplate.C
