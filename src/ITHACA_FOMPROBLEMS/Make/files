@@ -6,6 +6,8 @@ UnsteadyProblem/UnsteadyProblem.C
 SteadyNSTurbIntrusive/SteadyNSTurbIntrusive.C
 unsteadyNS/unsteadyNS.C
 UnsteadyBB/UnsteadyBB.C
+UnsteadyBBTurb/UnsteadyBBTurb.C
+UnsteadyBBTurb/LSPGUnsteadyBBTurb.C
 UnsteadyNSTurb/UnsteadyNSTurb.C
 UnsteadyNSTurb/TurbDiffusionHyperreduction.C
 UnsteadyNSTurbIntrusive/UnsteadyNSTurbIntrusive.C
@@ -13,6 +15,7 @@ unsteadyNST/unsteadyNST.C
 UnsteadyNSTTurb/UnsteadyNSTTurb.C
 SteadyNSSimple/SteadyNSSimple.C
 laplacianProblem/laplacianProblem.C
+LSPGProblem/LSPGProblem.C
 msrProblem/msrProblem.C
 unsteadymsrProblem/usmsrProblem.C
 UnsteadyNSExplicit/UnsteadyNSExplicit.C
