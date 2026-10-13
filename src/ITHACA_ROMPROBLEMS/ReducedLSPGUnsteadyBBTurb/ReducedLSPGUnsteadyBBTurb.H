@@ -52,26 +52,29 @@ SourceFiles
 #include <Eigen/Dense>
 #include <memory>
 
-struct InterpolationSettings
-{
+struct InterpolationSettings {
     int firstRBFIndex = 0;
     bool derivative = false;
     int dimInputRBF = 0;
 };
 
-struct NumberOfModes
-{
+struct NumberOfModes {
     int velocity = 0;
     int pressure = 0;
     int temperature = 0;
     int nut = 0;
 };
 
-struct GaussNewtonSettings
-{
+struct GaussNewtonSettings {
     int maxIter = 5;
     float tol = 1e-2;
-    float stagnationTol = 1e-3;
+    float stagnationTol = 1e-8;
+};
+
+struct DimensionParameters {
+    double u_ref = 1.0;
+    double l_ref = 1.0;
+    double t_ref = 1.0;
 };
 
 
@@ -79,14 +82,14 @@ struct GaussNewtonSettings
 /** In this class are implemented the methods to solve a reduced version of the unsteady, turbulent, buoyant Navier-stokes equations. This class must be used together with the FOM class */
 class ReducedLSPGUnsteadyBBTurb : public ReducedLSPG
 {
-  // *** Methods *** //
-  public:
+    // *** Methods *** //
+public:
     //- Empty constructor - Cannot be used to create an object of this class
     ReducedLSPGUnsteadyBBTurb() = delete;
-    
+
     //- Constructor that takes, other than the FOM, argc and argv
     ReducedLSPGUnsteadyBBTurb(std::shared_ptr<ITHACAcontext> context,
-      const LSPGUnsteadyBBTurb& problem);
+        const LSPGUnsteadyBBTurb& problem);
 
     //- Default destructor
     virtual ~ReducedLSPGUnsteadyBBTurb() = default;
@@ -94,28 +97,33 @@ class ReducedLSPGUnsteadyBBTurb : public ReducedLSPG
     //- Given the boundary conditions and a timeManager, solves the reduced problem
     void solveOnline(const word& bcROM, const word& bcROMT, const word& folder = "ITHACAoutput/OnlineLSPGROM/");
 
-  private:
+    void setDimensionParameters(const double u_ref, const double l_ref, const double t_ref);
+
+private:
     /// @brief Captures the relevant FOM data and stores it internally
     /// ideally the FOM could then be destroyed and the ROM would still work. This is still wip
     void captureFOMData(const LSPGUnsteadyBBTurb& problem);
 
     //- Assembles the residual vector
-    Eigen::VectorXd assembleResidual(const Eigen::VectorXd& state, bool correctBCs = true) override;
+    Eigen::VectorXd assembleResidual(const Eigen::VectorXd& state, const bool correctBCs = true, const bool writeResidual = false) override;
+
+    //- Assembles the residual vector using the current fields in memory
+    Eigen::VectorXd residualWithCurrentFields();
 
     //- Reconstructs the reduced solution fields from the currentState_ vector
     void reconstructReducedFields(
-      const Eigen::VectorXd& state,
-      volVectorField& velocity_field,
-      volScalarField& pressure_field,
-      volScalarField& temperature_field,
-      surfaceScalarField& phi_field,
-      bool correctBCs = true);
-  
+        const Eigen::VectorXd& state,
+        volVectorField& velocity_field,
+        volScalarField& pressure_field,
+        volScalarField& temperature_field,
+        surfaceScalarField& phi_field,
+        bool correctBCs = true);
+
     //- Interpolates the turbulent eddy viscosity coefficients from the RBF interpolation to the current state
     void interpolateNutCoeffs(
-      volScalarField& nut_field,
-      volScalarModes& nut_modes,
-      const Eigen::VectorXd& state);
+        volScalarField& nut_field,
+        volScalarModes& nut_modes,
+        const Eigen::VectorXd& state);
 
     //- Inverse Distance Weighting interpolation of the input parameters to get the current state vector
     Eigen::VectorXd interpolateIDW(const Eigen::VectorXd& input_parameters);
@@ -127,7 +135,13 @@ class ReducedLSPGUnsteadyBBTurb : public ReducedLSPG
     /// The method reads the fields from disk and projects them onto the modes to get the initial coefficients
     void initializePODCoeffsFromFields();
 
-  private:
+    ///- Manual assembly of the jacobian
+    void assembleJacobian(const Eigen::VectorXd& state,
+    const Eigen::VectorXd& residual,
+    Eigen::MatrixXd& jacobian,
+    const Time& runTime);
+
+private:
     //- Parameters for the offline solution
     Eigen::MatrixXd mu_;
 
@@ -154,7 +168,7 @@ class ReducedLSPGUnsteadyBBTurb : public ReducedLSPG
 
     //- Pressure modes
     volScalarModes Prghmodes_;
-    
+
     //- Temperature modes
     volScalarModes Tmodes_;
 
@@ -170,14 +184,26 @@ class ReducedLSPGUnsteadyBBTurb : public ReducedLSPG
     //- Turbulent omega modes
     volScalarModes omegaModes_;
 
+    //- Velocity initial conditions
+    PtrList<volVectorField> U0field_;
+
+    //- Flux initial conditions
+    PtrList<surfaceScalarField> Phi0field_;
+
+    //- Pressure initial conditions
+    PtrList<volScalarField> Prgh0field_;
+
+    //- Temperature initial conditions
+    PtrList<volScalarField> T0field_;
+
+    //- Eddy viscosity initial conditions
+    PtrList<volScalarField> Nut0field_;
+
     //- Fluctuating eddy viscosity fields
     PtrList<volScalarField> nutFields_;
 
     //- Averaged eddy viscosity fields
     PtrList<volScalarField> avgNutFields_;
-
-    ///- Settings for the ROM
-    ROMSettings romSettings_;
 
     ///- Interpolation settings
     InterpolationSettings interpolationSettings_;
@@ -201,7 +227,7 @@ class ReducedLSPGUnsteadyBBTurb : public ReducedLSPG
     ///- Pointer to the turbulent viscosity field
     autoPtr<volScalarField> _nut;
 
-    ///- Pointer to the Prandtl number 
+    ///- Pointer to the Prandtl number
     autoPtr<dimensionedScalar> _Pr;
 
     ///- Pointer to the turbulent Prandtl number
@@ -258,7 +284,7 @@ class ReducedLSPGUnsteadyBBTurb : public ReducedLSPG
 
     ///- Reference cell for pressure
     label pRefCell;
-    
+
     ///- Reference value for pressure
     scalar pRefValue;
 
@@ -274,6 +300,9 @@ class ReducedLSPGUnsteadyBBTurb : public ReducedLSPG
     label iP_;
 
     label iT_;
+
+    ///- Parameters used to non-dimensionalize the residual
+    DimensionParameters dimensionParameters_;
 };
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //

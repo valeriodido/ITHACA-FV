@@ -27,9 +27,6 @@
   along with ITHACA-FV. If not, see <http://www.gnu.org/licenses/>.
 
  \*---------------------------------------------------------------------------*/
-Info << "Reading thermophysical properties\n"
-     << endl;
-
 IOdictionary transportProperties(
     IOobject(
         "transportProperties",
@@ -102,7 +99,6 @@ _TRef = autoPtr<dimensionedScalar>(
 dimensionedScalar& TRef = _TRef();
 
 // Gravitational constant
-Info << "\nReading g" << endl;
 _g = autoPtr<dimensionedVector>(
          new dimensionedVector(
              "g",
@@ -110,7 +106,6 @@ _g = autoPtr<dimensionedVector>(
              vector(0, -9.81, 0)));
 dimensionedVector& g = _g();
 
-Info << "\nReading hRef" << endl;
 _hRef = autoPtr<dimensionedScalar>(
             new dimensionedScalar(
                 "hRef",
@@ -118,8 +113,7 @@ _hRef = autoPtr<dimensionedScalar>(
                 0));
 dimensionedScalar& hRef = _hRef();
 
-Info << "Calculating field ghRef\n"
-     << endl;
+
 _ghRef = autoPtr<dimensionedScalar>(
              new dimensionedScalar(
                  "ghRef",
@@ -127,8 +121,6 @@ _ghRef = autoPtr<dimensionedScalar>(
                  0));
 dimensionedScalar& ghRef = _ghRef();
 
-Info << "Reading field gh\n"
-     << endl;
 _gh = autoPtr<volScalarField>(
           new volScalarField(
               IOobject(
@@ -138,8 +130,7 @@ _gh = autoPtr<volScalarField>(
               (g & mesh.C()) - ghRef));
 volScalarField& gh = _gh();
 
-Info << "Reading field ghf\n"
-     << endl;
+
 _ghf = autoPtr<surfaceScalarField>(
            new surfaceScalarField(
                IOobject(
@@ -150,8 +141,6 @@ _ghf = autoPtr<surfaceScalarField>(
 surfaceScalarField& ghf = _ghf();
 
 // Reading fields
-Info << "Reading field T\n"
-     << endl;
 _T = autoPtr<volScalarField>(
          new volScalarField(
              IOobject(
@@ -163,8 +152,6 @@ _T = autoPtr<volScalarField>(
              mesh));
 volScalarField& T = _T();
 
-Info << "Reading field p_rgh\n"
-     << endl;
 _p_rgh = autoPtr<volScalarField>(
              new volScalarField(
                  IOobject(
@@ -176,8 +163,6 @@ _p_rgh = autoPtr<volScalarField>(
                  mesh));
 volScalarField& p_rgh = _p_rgh();
 
-Info << "Reading field U\n"
-     << endl;
 _U = autoPtr<volVectorField>(
          new volVectorField(
              IOobject(
@@ -195,8 +180,6 @@ _laminarTransport = autoPtr<singlePhaseTransportModel>(
                         new singlePhaseTransportModel(U, phi));
 singlePhaseTransportModel& laminarTransport = _laminarTransport();
 
-Info << "Creating turbulence model\n"
-     << endl;
 turbulence = autoPtr<incompressible::turbulenceModel>(
                  incompressible::turbulenceModel::New(U, phi, laminarTransport));
 
@@ -211,8 +194,6 @@ _rhok = autoPtr<volScalarField>(
 volScalarField& rhok = _rhok();
 
 // kinematic turbulent thermal conductivity m2/s
-Info << "Reading field alphat\n"
-     << endl;
 _alphat = autoPtr<volScalarField>(
               new volScalarField(
                   IOobject(
@@ -224,8 +205,6 @@ _alphat = autoPtr<volScalarField>(
                   mesh));
 volScalarField& alphat = _alphat();
 
-Info << "Reading field p\n"
-     << endl;
 _p = autoPtr<volScalarField>(
          new volScalarField(
              IOobject(

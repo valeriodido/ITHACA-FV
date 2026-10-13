@@ -30,30 +30,93 @@ SourceFiles
 \*---------------------------------------------------------------------------*/
 
 #include "ReducedLSPG.H"
+#include "ITHACAassert.H"
 
-ReducedLSPG::ReducedLSPG(std::shared_ptr<ITHACAcontext> context)
-: context_(std::move(context))
+ReducedLSPG::ReducedLSPG(std::shared_ptr<ITHACAcontext> context): context_(std::move(context))
 {
-  if (!context_)
-  {
-    FatalErrorInFunction
-      << "Context pointer is null. Please provide a valid ITHACAcontext object."
-      << exit(FatalError);
-  }
-  ITHACAdict = new IOdictionary
-  (
-      IOobject
-      (
-          "ITHACAdict",
-          runTime().system(),
-          mesh(),
-          IOobject::MUST_READ,
-          IOobject::NO_WRITE
-      )
-  );
+    if (!context_)
+    {
+        FatalErrorInFunction
+            << "Context pointer is null. Please provide a valid ITHACAcontext object."
+            << exit(FatalError);
+    }
+    ITHACAdict = new IOdictionary(
+        IOobject(
+            "ITHACAdict",
+            runTime().system(),
+            mesh(),
+            IOobject::MUST_READ,
+            IOobject::NO_WRITE
+        )
+    );
+    romSettings_ = ROMSettings
+    {
+        ITHACAdict->lookupOrDefault<word>("bcMethod", "lift"),
+        ITHACAdict->lookupOrDefault<word>("romID", ""),
+        ITHACAdict->lookupOrDefault<label>("snapshotCollectionMethod", 1),
+        ITHACAdict->lookupOrDefault<bool>("scaleResidualWithCellVolume", false)
+    };
 
-  romID_ = ITHACAdict->lookupOrDefault<word>("romID", "");
+    M_Assert(romSettings_.bcMethod == "lift" || romSettings_.bcMethod == "None", "Invalid bcMethod specified in ITHACAdict. Valid options are 'lift' or 'none'.");
+    M_Assert(romSettings_.bcMethod == "None" || romSettings_.snapshotCollectionMethod == 0, "If using bcMethod 'lift', snapshotCollectionMethod must be set to 0 in ITHACAdict.");
+    nCells = mesh().nCells();
+  }
+
+template<class Type>
+void ReducedLSPG::writeResidualField(
+  const word& name,
+  const fvMatrix<Type>& eqn,
+  const Field<Type>& R,
+  const fvMesh& mesh,
+  const bool perUnitVolume
+)
+{
+    typedef GeometricField<Type, fvPatchField, volMesh> fieldType;
+
+    // fvMatrix residuals are integrated over the cell volume
+    const dimensionSet dims =
+        perUnitVolume ? eqn.dimensions()/dimVolume : eqn.dimensions();
+
+    fieldType res
+    (
+        IOobject
+        (
+            name,
+            mesh.time().timeName(),
+            mesh,
+            IOobject::NO_READ,
+            IOobject::NO_WRITE
+        ),
+        mesh,
+        dimensioned<Type>("zero", dims, Zero),
+        zeroGradientFvPatchField<Type>::typeName
+    );
+
+    res.primitiveFieldRef() = R;
+    if (perUnitVolume)
+    {
+        res.primitiveFieldRef() /= mesh.V();
+    }
+    res.correctBoundaryConditions();
+
+    res.write();   // write() is unconditional, so it ignores runTime.writeTime()
 }
+// Template instantiation for the types we expect to use
+template void ReducedLSPG::writeResidualField<scalar>(
+    const word& name,
+    const fvMatrix<scalar>& eqn,
+    const Field<scalar>& R,
+    const fvMesh& mesh,
+    const bool perUnitVolume
+);
+template void ReducedLSPG::writeResidualField<vector>(
+    const word& name,
+    const fvMatrix<vector>& eqn,
+    const Field<vector>& R,
+    const fvMesh& mesh,
+    const bool perUnitVolume
+);
+
 
 argList& ReducedLSPG::args() const
 {
