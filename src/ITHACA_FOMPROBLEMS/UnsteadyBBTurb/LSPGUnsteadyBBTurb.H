@@ -65,311 +65,329 @@ Differing from the non-LSPG version of this class, here we do not assemble matri
 Moreover, we treat boundary conditions using a lifting approach, without however appending modes and lifting together.
 */
 
-class LSPGUnsteadyBBTurb : public LSPGProblem, public UnsteadyProblem
+class LSPGUnsteadyBBTurb : public LSPGProblem
+    , public UnsteadyProblem
 {
-    public:
-        /// Constructor
-        explicit LSPGUnsteadyBBTurb(std::shared_ptr<ITHACAcontext> context);
+public:
+    /// Constructor
+    explicit LSPGUnsteadyBBTurb(std::shared_ptr<ITHACAcontext> context);
 
-        ~LSPGUnsteadyBBTurb() { };
+    ~LSPGUnsteadyBBTurb() { };
 
-                //--------------------------------------------------------------------------
-        /// @brief     Method to correctly prepare the modes (supremizer and lifting if necessary), be it PPE, Supremizer or VMB
-        ///
-        void prepareModes();
+    //--------------------------------------------------------------------------
+    /// @brief     Method to correctly prepare the modes (supremizer and lifting if necessary), be it PPE, Supremizer or VMB
+    ///
+    void prepareModes();
 
-        //--------------------------------------------------------------------------
-        /// @brief   Solves the CFD problem for parameters mu_now. Differently
-        /// from UnsteadyBB, here the eddy viscosity field is also computed and saved.
-        /// @param[in]  mu_now  The actual value of the parameter for this truthSolve. Used only
-        /// @param[in]  nSample  The sample number for which the truth solve is performed.
-        void truthSolve(const List<scalar> mu_now, label nSample);
+    //--------------------------------------------------------------------------
+    /// @brief   Solves the CFD problem for parameters mu_now. Differently
+    /// from UnsteadyBB, here the eddy viscosity field is also computed and saved.
+    /// @param[in]  mu_now  The actual value of the parameter for this truthSolve. Used only
+    /// @param[in]  nSample  The sample number for which the truth solve is performed.
+    void truthSolve(const List<scalar> mu_now, label nSample);
 
-        //--------------------------------------------------------------------------
-        /// @brief   Solves the CFD problem for parameters mu_now. Differently
-        /// from UnsteadyBB, here the eddy viscosity field is also computed and saved.
-        void truthSolve(fileName folder = "./ITHACAOutput/Offline");
+    //--------------------------------------------------------------------------
+    /// @brief   Solves the CFD problem for parameters mu_now. Differently
+    /// from UnsteadyBB, here the eddy viscosity field is also computed and saved.
+    void truthSolve(fileName folder = "./ITHACAOutput/Offline");
 
-        /// @brief      A method to compute the two matrices needed for the RBF interpolation by combining
-        /// the velocity L2 projection coefficients and their time derivatives [a, a_dot]. The time derivatives
-        /// are computed using a finite difference scheme according to the list of time instants provided snapshotTimes.
-        ///
-        /// @param[in]  A            The velocity L2 projection coefficients
-        /// @param[in]  G            The eddy viscoisty L2 projection coefficients
-        /// @param[in]  snapshotTimes A list of Eigen vectors containing the time instants for each snapshot
-        ///
-        /// @return     The matrix of the combined velocity L2 projection coefficients starting from the second
-        /// snapshots for each parameter sample together with their time derivatives and also the matrix of the
-        /// eddy viscosity L2 projection coefficients associated with the first matrix
-        ///
-        List<Eigen::MatrixXd> velDerivativeCoeff(const Eigen::MatrixXd& A,
-                const Eigen::MatrixXd& G, const List<Eigen::VectorXd>& snapshotTimes);
+    /// @brief      A method to compute the two matrices needed for the RBF interpolation by combining
+    /// the velocity L2 projection coefficients and their time derivatives [a, a_dot]. The time derivatives
+    /// are computed using a finite difference scheme according to the list of time instants provided snapshotTimes.
+    ///
+    /// @param[in]  A            The velocity L2 projection coefficients
+    /// @param[in]  G            The eddy viscoisty L2 projection coefficients
+    /// @param[in]  snapshotTimes A list of Eigen vectors containing the time instants for each snapshot
+    ///
+    /// @return     The matrix of the combined velocity L2 projection coefficients starting from the second
+    /// snapshots for each parameter sample together with their time derivatives and also the matrix of the
+    /// eddy viscosity L2 projection coefficients associated with the first matrix
+    ///
+    List<Eigen::MatrixXd> velDerivativeCoeff(const Eigen::MatrixXd& A,
+        const Eigen::MatrixXd& G, const List<Eigen::VectorXd>& snapshotTimes);
 
-        //--------------------------------------------------------------------------
-        /// @brief     Splits the eddy viscosity field snapshots in average and fluctuating part
-        ///
-        void splitEddyViscositySnapshots();
+    //--------------------------------------------------------------------------
+    /// @brief     Splits the eddy viscosity field snapshots in average and fluctuating part
+    ///
+    void splitEddyViscositySnapshots();
 
-        //--------------------------------------------------------------------------
-        /// @brief     Carries out the RBF interpolation
-        ///
-        void offlineRBFInterpolation();
+    //--------------------------------------------------------------------------
+    /// @brief     Carries out the RBF interpolation
+    ///
+    void offlineRBFInterpolation();
 
-        //--------------------------------------------------------------------------
-        /// @brief      Resets the fields after a truthSolve, reading from disk the initial conditions.
-        ///
-        void restart();
+    //--------------------------------------------------------------------------
+    /// @brief      Resets the fields after a truthSolve, reading from disk the initial conditions.
+    ///
+    void restart();
 
-        //--------------------------------------------------------------------------
-        /// @brief      Resizes the modes before the Online phase, according to the number of modes chosen
-        ///
-        void resizeModes();
+    //--------------------------------------------------------------------------
+    /// @brief      Resizes the modes before the Online phase, according to the number of modes chosen
+    ///
+    void resizeModes();
 
-        //--------------------------------------------------------------------------
-        /// @brief      Assembles the POD modes
-        ///
-        void computePOD();
+    //--------------------------------------------------------------------------
+    /// @brief      Assembles the POD modes
+    ///
+    void computePOD();
 
-        //--------------------------------------------------------------------------
-        /// @brief      Complete set up of the lift approach
-        ///
-        void setupLift();
+    //--------------------------------------------------------------------------
+    /// @brief      Complete set up of the lift approach
+    ///
+    void setupLift();
 
-        //--------------------------------------------------------------------------
-        /// @brief      Switch off the AUTO_WRITE options so that successive ROM runs
-        /// do not write U, and other fields. (They write U_r, ...)
-        ///
-        void switchOffAutoWrite();
+    //--------------------------------------------------------------------------
+    /// @brief      Switch off the AUTO_WRITE options so that successive ROM runs
+    /// do not write U, and other fields. (They write U_r, ...)
+    ///
+    void switchOffAutoWrite();
 
-        //--------------------------------------------------------------------------
-        /// @brief      Loads the fields from disk
-        ///
-        void loadFieldsFromDisk(word offlinepath = "./ITHACAOutput/Offline");
-        
-    private:
-        ///- Reads the dictionary ITHACAdict and sets the relevant parameters
-        void readITHACAdict();
-        
-        //--------------------------------------------------------------------------
-        /// @brief      Centers the snapshots before POD
-        void removeMean();
-        
-        //--------------------------------------------------------------------------
-        /// @brief      Solves the lift problem for the velocity
-        ///
-        void liftSolve();
+    //--------------------------------------------------------------------------
+    /// @brief      Loads the fields from disk
+    ///
+    void loadFieldsFromDisk(word offlinepath = "./ITHACAOutput/Offline");
 
-        //--------------------------------------------------------------------------
-        /// @brief      Solves the lift problem for the temperature
-        ///
-        void liftSolveT();
+    //--------------------------------------------------------------------------
+    /// @brief      Prepares the snapshots, centering them if requested
+    ///
+    void prepareSnapshots();
 
-        //--------------------------------------------------------------------------
-        /// @brief      Homogenizes the snapshots for flux
-        ///
-        void homogenizePhi(
-          const PtrList<surfaceScalarField>& phifields,
-          const PtrList<surfaceScalarField>& phifieldsLift,
-          PtrList<surfaceScalarField>& phifieldsHomogenized);
+    //--------------------------------------------------------------------------
+    /// @brief  Fills the mu vector, sets Pnumber and Tnumber
+    /// @param[in] velocity_file The file containing the velocity BC
+    /// @param[in] temperature_file The file containing the temperature BC
+    void prepareParametersMu(const word& velocity_file, const word& temperature_file);
 
-        //--------------------------------------------------------------------------
-        /// @brief      Computes the phi modes with the same linear combination of the velocity modes
-        ///
-        void getPhiModes(
-          volVectorModes& Umodes,
-          PtrList<volVectorField>& Uomfield,
-          surfaceScalarModes& Phimodes,
-          PtrList<surfaceScalarField>& Phiomfield
-        );
+private:
+    ///- Reads the dictionary ITHACAdict and sets the relevant parameters
+    void readITHACAdict();
 
-    private:
-        //- Number of velocity modes
-        label NUmodes_;
+    //--------------------------------------------------------------------------
+    /// @brief      Solves the lift problem for the velocity
+    ///
+    void liftSolve();
 
-        //- Number of pressure modes
-        label NPrghmodes_;
+    //--------------------------------------------------------------------------
+    /// @brief      Solves the lift problem for the temperature
+    ///
+    void liftSolveT();
 
-        //- Number of temperature modes
-        label NTmodes_;
+    //--------------------------------------------------------------------------
+    /// @brief      Homogenizes the snapshots for flux
+    ///
+    void homogenizePhi(
+        const PtrList<surfaceScalarField>& phifields,
+        const PtrList<surfaceScalarField>& phifieldsLift,
+        PtrList<surfaceScalarField>& phifieldsHomogenized);
 
-        //- Number of eddy viscosity modes
-        label NNutModes_;
+    //--------------------------------------------------------------------------
+    /// @brief      Computes the phi modes with the same linear combination of the velocity modes
+    ///
+    void getPhiModes(
+        volVectorModes& Umodes,
+        PtrList<volVectorField>& Uomfield,
+        surfaceScalarModes& Phimodes,
+        PtrList<surfaceScalarField>& Phiomfield);
 
-        ///- Reference cell for pressure
-        label pRefCell;
-        scalar pRefValue;
-        
-        /// Identifier for bcMethod, which can be "lift", "penalty" or "Gunzburger"
-        word bcMethod;
+private:
+    //- Number of velocity modes
+    label NUmodes_;
 
-        ///- Whether we mean-center
-        bool centerSnapshots;
+    //- Number of pressure modes
+    label NPrghmodes_;
 
-        /// adjustTimeStep
-        bool adjustTimeStep;
+    //- Number of temperature modes
+    label NTmodes_;
 
-        /// maxCourant
-        scalar maxCo;
+    //- Number of eddy viscosity modes
+    label NNutModes_;
 
-        /// maxDeltaT
-        scalar maxDeltaT;
-    
-    protected:
-        /// List of time snapshots for each parameter sample
-        List<Eigen::VectorXd> timeSnapshots;
-    
-    public:
-        //- Velocity snapshots
-        PtrList<volVectorField> Ufield;
+    ///- Reference cell for pressure
+    label pRefCell;
+    scalar pRefValue;
 
-        //- Homogenized velocity snapshots
-        PtrList<volVectorField> Uomfield;
+    /// Identifier for bcMethod, which can be "lift", "penalty" or "Gunzburger"
+    word bcMethod;
 
-        //- Flux field
-        PtrList<surfaceScalarField> Phifield;
+    /// Snapshot collection procedure. If 1, the parameter-mean is subtracted from the snapshots.
+    label snapshotCollectionMethod;
 
-        //- Flux homogenized field
-        PtrList<surfaceScalarField> Phiomfield;
+    /// adjustTimeStep
+    bool adjustTimeStep;
 
-        //- Lift fields for velocity
-        PtrList<volVectorField> liftfield;
+    /// maxCourant
+    scalar maxCo;
 
-        //- Lift homogenized fields for phi
-        PtrList<surfaceScalarField> liftfieldphi;
+    /// maxDeltaT
+    scalar maxDeltaT;
 
-        //- Pressure snapshots
-        PtrList<volScalarField> Prghfield;
+protected:
+    /// List of time snapshots for each parameter sample
+    List<Eigen::VectorXd> timeSnapshots;
 
-        //- Temperature snapshots
-        PtrList<volScalarField> Tfield;
+public:
+    //- Velocity snapshots
+    PtrList<volVectorField> Ufield;
 
-        //- Homogenized temperature snapshots
-        PtrList<volScalarField> Tomfield;
+    //- Homogenized velocity snapshots
+    PtrList<volVectorField> Uomfield;
 
-        //- Lift fields for temperature
-        PtrList<volScalarField> liftfieldT;
+    //- Initial conditions for velocity
+    PtrList<volVectorField> U0field;
 
-        /// Snapshots for eddy viscosity
-        PtrList<volScalarField> Nutfield;
+    //- Flux field
+    PtrList<surfaceScalarField> Phifield;
 
-        /// Snapshots for turbulent kinetic energy
-        PtrList<volScalarField> kfield;
+    //- Flux homogenized field
+    PtrList<surfaceScalarField> Phiomfield;
 
-        /// Snapshots for omega
-        PtrList<volScalarField> omegafield;
+    //- Initial conditions for flux
+    PtrList<surfaceScalarField> Phi0field;
 
-        //- Velocity POD modes
-        volVectorModes Umodes;
+    //- Lift fields for velocity
+    PtrList<volVectorField> liftfield;
 
-        //- Flux POD modes
-        surfaceScalarModes Phimodes;
+    //- Lift homogenized fields for phi
+    PtrList<surfaceScalarField> liftfieldphi;
 
-        //- Pressure POD modes
-        volScalarModes Prghmodes;
+    //- Pressure snapshots
+    PtrList<volScalarField> Prghfield;
 
-        //- Temperature POD modes
-        volScalarModes Tmodes;
+    //- Initial conditions for pressure
+    PtrList<volScalarField> Prgh0field;
 
-        //- Eddy viscosity POD modes
-        volScalarModes nutmodes;
+    //- Temperature snapshots
+    PtrList<volScalarField> Tfield;
 
-        //- Kinetic energy POD modes
-        volScalarModes kmodes;
+    //- Initial conditions for temperature
+    PtrList<volScalarField> T0field;
 
-        //- Omega POD modes
-        volScalarModes omegamodes;
+    //- Homogenized temperature snapshots
+    PtrList<volScalarField> Tomfield;
 
-        // Snapshot average of velocity
-        autoPtr<volVectorField> UavgPtr;
+    //- Lift fields for temperature
+    PtrList<volScalarField> liftfieldT;
 
-        // Snapshot average of temperature
-        autoPtr<volScalarField> TavgPtr;
+    /// Snapshots for eddy viscosity
+    PtrList<volScalarField> Nutfield;
 
-        // Snapshot average of pressure
-        autoPtr<volScalarField> p_rghavgPtr;
+    //- Initial conditions for eddy viscosity
+    PtrList<volScalarField> Nut0field;
 
-        /// List of fluctuating eddy viscosity fields. One for each parameter sample
-        PtrList<volScalarField> fluctNutfield;
+    /// Snapshots for turbulent kinetic energy
+    PtrList<volScalarField> kfield;
 
-        /// List of averaged eddy viscosity fields. One for each parameter sample
-        PtrList<volScalarField> avgNutfield;
+    /// Snapshots for omega
+    PtrList<volScalarField> omegafield;
 
-        /// Interpolators for nut coefficient interpolation
-        std::vector<std::shared_ptr<ithacaInterpolator>> rbfSplines;
+    //- Velocity POD modes
+    volVectorModes Umodes;
 
-        // Dimension of the interpolation matrix A
-        label dimA;
+    //- Flux POD modes
+    surfaceScalarModes Phimodes;
 
-    public:
-        ///- Laminar transport pointer
-        autoPtr<singlePhaseTransportModel> _laminarTransport;
+    //- Pressure POD modes
+    volScalarModes Prghmodes;
 
-        ///- Turbulent transport pointer
-        autoPtr<incompressible::turbulenceModel> turbulence; // For conformity, can we rename this to _..., by changing the fields?
+    //- Temperature POD modes
+    volScalarModes Tmodes;
 
-        ///- Pointer to the reduced velocity field
-        autoPtr<volVectorField> _U;
+    //- Eddy viscosity POD modes
+    volScalarModes nutmodes;
 
-        ///- Pointer to the ULiftBC field
-        autoPtr<volScalarField> _UliftBC;
-        
-        ///- Pointer to the reduced face flux field
-        autoPtr<surfaceScalarField> _phi;
-        
-        ///- Pointer to the pressure field
-        autoPtr<volScalarField> _p;
-        
-        ///- Pointer to the reduced p_rgh
-        autoPtr<volScalarField> _p_rgh;
-        
-        ///- Pointer to the reduced temperature field
-        autoPtr<volScalarField> _T;
-        
-        ///- Pointer to kinematic density
-        autoPtr<volScalarField> _rhok;
-        
-        ///- Pointer to the kinematic turbulent thermal conductivity
-        autoPtr<volScalarField> _alphat;
-        
-        ///- Pointer to the turbulent viscosity field
-        autoPtr<volScalarField> _nut;
+    //- Kinetic energy POD modes
+    volScalarModes kmodes;
 
-        ///- Pointer to the turbulent kinetic energy field
-        autoPtr<volScalarField> _k;
+    //- Omega POD modes
+    volScalarModes omegamodes;
 
-        ///- Pointer to the turbulent omega field
-        autoPtr<volScalarField> _omega;
-        
-        ///- Pointer to the kinematic viscosity field
-        autoPtr<dimensionedScalar> _nu;
+    // Snapshot average of velocity
+    autoPtr<volVectorField> UavgPtr;
 
-        ///- Pointer to the Prandtl number 
-        autoPtr<dimensionedScalar> _Pr;
-        
-        ///- Pointer to the turbulent Prandtl number
-        autoPtr<dimensionedScalar> _Prt;
-        
-        ///- Pointer to the thermal expansion coefficient
-        autoPtr<dimensionedScalar> _beta;
-        
-        ///- Pointer to the reference temperature
-        autoPtr<dimensionedScalar> _TRef;
-        
-        ///- Gravitational constant
-        autoPtr<dimensionedVector> _g;
-        
-        ///- Pointer to hRef
-        autoPtr<dimensionedScalar> _hRef;
-        
-        ///- Pointer ot ghRef
-        autoPtr<dimensionedScalar> _ghRef;
-        
-        ///- Pointer to field gh
-        autoPtr<volScalarField> _gh;
-        
-        ///- Pointer to field ghf
-        autoPtr<surfaceScalarField> _ghf;
+    // Snapshot average of temperature
+    autoPtr<volScalarField> TavgPtr;
 
+    // Snapshot average of pressure
+    autoPtr<volScalarField> p_rghavgPtr;
+
+    /// List of fluctuating eddy viscosity fields. One for each parameter sample
+    PtrList<volScalarField> fluctNutfield;
+
+    /// List of averaged eddy viscosity fields. One for each parameter sample
+    PtrList<volScalarField> avgNutfield;
+
+    /// Interpolators for nut coefficient interpolation
+    std::vector<std::shared_ptr<ithacaInterpolator>> rbfSplines;
+
+public:
+    ///- Laminar transport pointer
+    autoPtr<singlePhaseTransportModel> _laminarTransport;
+
+    ///- Turbulent transport pointer
+    autoPtr<incompressible::turbulenceModel> turbulence; // For conformity, can we rename this to _..., by changing the fields?
+
+    ///- Pointer to the reduced velocity field
+    autoPtr<volVectorField> _U;
+
+    ///- Pointer to the ULiftBC field
+    autoPtr<volScalarField> _UliftBC;
+
+    ///- Pointer to the reduced face flux field
+    autoPtr<surfaceScalarField> _phi;
+
+    ///- Pointer to the pressure field
+    autoPtr<volScalarField> _p;
+
+    ///- Pointer to the reduced p_rgh
+    autoPtr<volScalarField> _p_rgh;
+
+    ///- Pointer to the reduced temperature field
+    autoPtr<volScalarField> _T;
+
+    ///- Pointer to kinematic density
+    autoPtr<volScalarField> _rhok;
+
+    ///- Pointer to the kinematic turbulent thermal conductivity
+    autoPtr<volScalarField> _alphat;
+
+    ///- Pointer to the turbulent viscosity field
+    autoPtr<volScalarField> _nut;
+
+    ///- Pointer to the turbulent kinetic energy field
+    autoPtr<volScalarField> _k;
+
+    ///- Pointer to the turbulent omega field
+    autoPtr<volScalarField> _omega;
+
+    ///- Pointer to the kinematic viscosity field
+    autoPtr<dimensionedScalar> _nu;
+
+    ///- Pointer to the Prandtl number
+    autoPtr<dimensionedScalar> _Pr;
+
+    ///- Pointer to the turbulent Prandtl number
+    autoPtr<dimensionedScalar> _Prt;
+
+    ///- Pointer to the thermal expansion coefficient
+    autoPtr<dimensionedScalar> _beta;
+
+    ///- Pointer to the reference temperature
+    autoPtr<dimensionedScalar> _TRef;
+
+    ///- Gravitational constant
+    autoPtr<dimensionedVector> _g;
+
+    ///- Pointer to hRef
+    autoPtr<dimensionedScalar> _hRef;
+
+    ///- Pointer ot ghRef
+    autoPtr<dimensionedScalar> _ghRef;
+
+    ///- Pointer to field gh
+    autoPtr<volScalarField> _gh;
+
+    ///- Pointer to field ghf
+    autoPtr<surfaceScalarField> _ghf;
 };
 
 #endif

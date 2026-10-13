@@ -28,7 +28,6 @@
 
 \*---------------------------------------------------------------------------*/
 
-
 /// \file
 /// Source file of the LSPGProblem class.
 
@@ -49,10 +48,11 @@ LSPGProblem::LSPGProblem(std::shared_ptr<ITHACAcontext> context)
             IOobject::NO_WRITE));
     
     ITHACAparameters::getInstance(mesh(), runTime());
+    offline = ITHACAutilities::check_off();
+    podex = ITHACAutilities::check_pod();
 }
 
 LSPGProblem::LSPGProblem(int argc, char* argv[])
 : LSPGProblem(std::make_shared<ITHACAcontext>(argc, argv))
 {
 }
-

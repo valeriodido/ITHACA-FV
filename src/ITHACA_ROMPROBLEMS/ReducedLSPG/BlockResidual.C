@@ -12,8 +12,6 @@ BlockResidual::BlockResidual(std::vector<BlockSpec> specs)
     M_Assert(spec.size > 0, "Block has size <= 0");
     M_Assert(spec.weight > 0, "Block has weight <= 0");
     M_Assert(spec.rowWeights.size() == 0 || spec.rowWeights.size() == spec.size, "Block has rowWeights size mismatch with block size");
-    // Should actually be:
-    //  M_Assert(spec.rowWeights.size() == 0 || spec.rowWeights.size() == spec.size, ...);
     for (const Block& otherblock : blocks_)
     {
       M_Assert(spec.name != otherblock.name, "Duplicate block name found.");
@@ -24,7 +22,6 @@ BlockResidual::BlockResidual(std::vector<BlockSpec> specs)
     block.offset = offset;
     block.size = spec.size;
     block.weight = spec.weight;
-    block.rowWeights = spec.rowWeights;
     block.rowWeights = std::move(spec.rowWeights);
     blocks_.push_back(std::move(block));
 
@@ -160,7 +157,7 @@ void BlockResidual::applyScaling() const
 
 double BlockResidual::norm() const
 {
-  // A OpenMPI safe way must be implemented here
+  // A OpenMPI safe way must be implemented 
   return vector().norm();
 }
 
@@ -175,4 +172,11 @@ const Eigen::VectorXd& BlockResidual::vector() const
 {
   applyScaling();
   return scaled_;
+}
+
+Eigen::Ref<const Eigen::VectorXd> BlockResidual::block(int block_index) const
+{
+  const Block& block = at(block_index);
+  applyScaling();
+  return scaled_.segment(block.offset, block.size);
 }

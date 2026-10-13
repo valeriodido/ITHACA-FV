@@ -50,8 +50,6 @@ LSPGUnsteadyBBTurb::LSPGUnsteadyBBTurb(std::shared_ptr<ITHACAcontext> context): 
     pimpleControl& pimple = this->pimple();
     fv::options& fvOptions = this->fvOptions();
 #include "createFields.H"
-    offline = ITHACAutilities::check_off();
-    podex = ITHACAutilities::check_pod();
     readITHACAdict();
     _k = autoPtr<volScalarField>(
         new volScalarField(
@@ -76,9 +74,11 @@ LSPGUnsteadyBBTurb::LSPGUnsteadyBBTurb(std::shared_ptr<ITHACAcontext> context): 
 void LSPGUnsteadyBBTurb::readITHACAdict()
 {
     bcMethod = ITHACAdict->lookupOrDefault<word>("bcMethod", "None");
-    centerSnapshots = ITHACAdict->lookupOrDefault<bool>("centerSnapshots", false);
+    snapshotCollectionMethod = ITHACAdict->lookupOrDefault<label>("snapshotCollectionMethod", 0);
 
-    M_Assert(bcMethod == "lift", "The BC method must be set to lift in ITHACAdict. Other methods are not implemented yet.");
+    M_Assert(bcMethod == "lift" || bcMethod == "None", "The BC method must be set to 'lift' or 'None' in ITHACAdict. Other methods are not implemented yet.");
+    M_Assert(snapshotCollectionMethod == 0 || snapshotCollectionMethod == 1, "The snapshot collection method must be either 0 (no IC subtraction) or 1 (IC subtraction).");
+    M_Assert(bcMethod == "None" || snapshotCollectionMethod == 0, "If the BC method is set to lift, the snapshot collection method must be set to 0 (no IC subtraction).");
 
     NUmodes_ = ITHACAdict->lookupOrDefault<label>("NmodesUproj", 5);
     NTmodes_ = ITHACAdict->lookupOrDefault<label>("NmodesTproj", 5);
@@ -285,11 +285,6 @@ void LSPGUnsteadyBBTurb::truthSolve(fileName folder)
     }
 }
 
-void LSPGUnsteadyBBTurb::removeMean()
-{
-    Info << "Not implemented yet" << endl;
-}
-
 // * * * * * * * * * * * * * * RBF Prep Methods * * * * * * * * * * * * * * //
 void LSPGUnsteadyBBTurb::offlineRBFInterpolation()
 {
@@ -337,7 +332,6 @@ void LSPGUnsteadyBBTurb::offlineRBFInterpolation()
         velDerCoeff[0] = coeffL2vel.transpose();
         velDerCoeff[1] = coeffL2nut.transpose();
     }
-    dimA = velDerCoeff[0].cols();
 
     if (Pstream::master())
     {
@@ -428,58 +422,60 @@ List<Eigen::MatrixXd> LSPGUnsteadyBBTurb::velDerivativeCoeff(
 
 void LSPGUnsteadyBBTurb::splitEddyViscositySnapshots()
 {
-    ITHACAstream::ReadDenseMatrixList(timeSnapshots, "./ITHACAoutput/Offline/", "timeSnapshots");
     const label nSamples = timeSnapshots.size();
-    avgNutfield.setSize(nSamples);
     const label totalSnapshots = Nutfield.size();
+    avgNutfield.setSize(nSamples);
     fluctNutfield.setSize(totalSnapshots);
-    label globalIndex = 0;
-    label flatIndex = 0;
 
-    for (label i = 0; i < nSamples; i++)
+    if (snapshotCollectionMethod == 0)
     {
-        label nSnap = timeSnapshots[i].size();
-        M_Assert(nSnap > 0, "Each parameter sample must have at least one snapshot");
-        avgNutfield.set(i, new volScalarField(IOobject("avgNut", Nutfield[globalIndex].time().timeName(), Nutfield[globalIndex].mesh(), IOobject::NO_READ, IOobject::NO_WRITE), Nutfield[globalIndex]));
-        volScalarField& avg = avgNutfield[i];
-
-        for (label j = 1; j < nSnap; j++)
+        label globalIndex = 0;
+        label flatIndex = 0;
+        for (label i = 0; i < nSamples; i++)
         {
-            avg += Nutfield[globalIndex + j];
+            label nSnap = timeSnapshots[i].size();
+            M_Assert(nSnap > 0, "Each parameter sample must have at least one snapshot");
+            avgNutfield.set(i, new volScalarField(IOobject("avgNut", Nutfield[globalIndex].time().timeName(), Nutfield[globalIndex].mesh(), IOobject::NO_READ, IOobject::NO_WRITE), Nutfield[globalIndex]));
+            volScalarField& avg = avgNutfield[i];
+
+            for (label j = 1; j < nSnap; j++)
+            {
+                avg += Nutfield[globalIndex + j];
+            }
+
+            avg /= scalar(nSnap);
+
+            for (label j = 0; j < nSnap; j++)
+            {
+                fluctNutfield.set(flatIndex,
+                    new volScalarField(Nutfield[globalIndex + j] - avg));
+                fluctNutfield[flatIndex].rename("fluctNut");
+                flatIndex++;
+            }
+            globalIndex += nSnap;
+        }
+    } else
+    {
+        Info << "avgNutfield.size() = " << avgNutfield.size() << ", Nut0field.size() = " << Nut0field.size() << endl;
+        M_Assert(avgNutfield.size() == Nut0field.size(), "avgNutfield and Nut0field must have the same size when using snapshotCollectionMethod 1.");
+        M_Assert(fluctNutfield.size() == Nutfield.size(), "fluctNutfield and Nutfield must have the same size when using snapshotCollectionMethod 1.");
+
+        for (label i = 0; i < Nut0field.size(); ++i)
+        {
+            avgNutfield.set(i, Nut0field[i].clone());
         }
 
-        avg /= scalar(nSnap);
-
-        for (label j = 0; j < nSnap; j++)
+        for (label i = 0; i < Nutfield.size(); ++i)
         {
-            fluctNutfield.set(flatIndex,
-                new volScalarField(Nutfield[globalIndex + j] - avg));
-            fluctNutfield[flatIndex].rename("fluctNut");
-            flatIndex++;
+            fluctNutfield.set(i, Nutfield[i].clone());
         }
-
-        globalIndex += nSnap;
     }
 }
 
 // * * * * * * * * * * * * * * Preparation of modes * * * * * * * * * *  //
 void LSPGUnsteadyBBTurb::prepareModes()
 {
-    if (centerSnapshots)
-    {
-        Umodes.append(UavgPtr->clone());
-        Tmodes.append(TavgPtr->clone());
-        // Add the Prgh mean field to the top of the volScalarModes (derivated from autoPtr<volScalarField>), without substitutuing
-        int oldPsize = Prghmodes.size();
-        Prghmodes.resize(oldPsize + 1);
 
-        for (label i = oldPsize; i > 0; i--)
-        {
-            Prghmodes.set(i, Prghmodes.release(i - 1));
-        }
-
-        Prghmodes.set(0, p_rghavgPtr->clone());
-    }
 }
 
 // * * * * * * * * * * * * * * Restart Methods * * * * * * * * * * * * * //
@@ -843,4 +839,76 @@ void LSPGUnsteadyBBTurb::loadFieldsFromDisk(
     ITHACAstream::read_fields(Nutfield, _nut(), offlinepath);
     ITHACAstream::read_fields(kfield, _k(), offlinepath);
     ITHACAstream::read_fields(omegafield, _omega(), offlinepath);
+}
+
+void LSPGUnsteadyBBTurb::prepareSnapshots()
+{
+    M_Assert(timeSnapshots.size() > 0, "No time snapshots have been collected. Please run the truth solve first.");
+    M_Assert(Ufield.size() > 0, "No velocity snapshots have been collected. Please run the truth solve first.");
+    if (snapshotCollectionMethod == 1)
+    {
+        // Here we center each computed trajectory around its initial condition
+        for (label i = 0; i < mu.cols(); i++) // looping over each trajectory
+        {
+            U0field.set(i, Ufield[i * timeSnapshots[i].size()].clone());
+            Phi0field.set(i, Phifield[i * timeSnapshots[i].size()].clone());
+            Prgh0field.set(i, Prghfield[i * timeSnapshots[i].size()].clone());
+            T0field.set(i, Tfield[i * timeSnapshots[i].size()].clone());
+            Nut0field.set(i, Nutfield[i * timeSnapshots[i].size()].clone());
+            for (label j = 0; j < timeSnapshots[i].size(); j++)
+            {
+                Ufield[i * timeSnapshots[i].size() + j] -= U0field[i];
+                Tfield[i * timeSnapshots[i].size() + j] -= T0field[i];
+                Prghfield[i * timeSnapshots[i].size() + j] -= Prgh0field[i];
+                Nutfield[i * timeSnapshots[i].size() + j] -= Nut0field[i];
+                Phifield[i * timeSnapshots[i].size() + j] -= Phi0field[i];
+            }
+        }
+        Info << "### MESSAGE - Centering of snapshots around initial condition completed." << endl;
+    }
+}
+
+void LSPGUnsteadyBBTurb::prepareParametersMu(const word& velocity_file, const word& temperature_file)
+{
+    const Eigen::MatrixXd boundary_condition = ITHACAstream::readMatrix(velocity_file);
+    const Eigen::MatrixXd boundary_condition_T = ITHACAstream::readMatrix(temperature_file);
+
+    M_Assert(boundary_condition.rows() == boundary_condition_T.rows(), "Number of parameter sets for BCs and Temperature BCs must be the same!");
+    M_Assert(boundary_condition.rows() > 0, "Boundary condition matrix must have at least one row.");
+    M_Assert(boundary_condition.cols() > 0, "Boundary condition matrix must have at least one column.");
+    M_Assert(boundary_condition_T.cols() > 0, "Temperature boundary condition matrix must have at least one column.");
+    M_Assert(boundary_condition_T.rows() > 0, "Temperature boundary condition matrix must have at least one row.");
+
+    Pnumber = boundary_condition.cols() + boundary_condition_T.cols();
+    Tnumber = boundary_condition.rows();
+    if (snapshotCollectionMethod == 1)
+    {
+        U0field.setSize(Tnumber);
+        Phi0field.setSize(Tnumber);
+        Prgh0field.setSize(Tnumber);
+        T0field.setSize(Tnumber);
+        Nut0field.setSize(Tnumber);
+    }
+    setParameters(); // Sets mu to be (Pnumber x Tnumber)
+
+    for (label i = 0; i < boundary_condition.cols(); i++)
+    {
+        double minVal = boundary_condition.col(i).minCoeff();
+        double maxVal = boundary_condition.col(i).maxCoeff();
+        mu_range.row(i) << minVal, maxVal;
+    }
+    for (label i = 0; i < boundary_condition_T.cols(); i++)
+    {
+        double minVal = boundary_condition_T.col(i).minCoeff();
+        double maxVal = boundary_condition_T.col(i).maxCoeff();
+        mu_range.row(boundary_condition.cols() + i) << minVal, maxVal;
+    }
+    for (label i = 0; i < boundary_condition.rows(); i++)
+    {
+        mu.col(i).head(boundary_condition.cols()) =
+            boundary_condition.row(i).transpose();
+
+        mu.col(i).tail(boundary_condition_T.cols()) =
+            boundary_condition_T.row(i).transpose();
+    }
 }

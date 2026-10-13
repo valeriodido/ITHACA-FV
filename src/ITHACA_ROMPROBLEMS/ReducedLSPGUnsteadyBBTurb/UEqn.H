@@ -25,20 +25,10 @@
 
 // Assemble the mom equation to compute the residual for the LSPG
 MRF.correctBoundaryVelocity(U);
-fvVectorMatrix UEqn
-(
-    fvm::ddt(U) + fvm::div(phi, U)
-    + MRF.DDt(U)
-    + turbulence->divDevReff(U)
-    ==
-    fvOptions(U)
-);
+volScalarField nuEff("nuEffROM", _nu() + nut);
+fvVectorMatrix UEqn(
+    fvm::ddt(U) + fvm::div(phi, U) + MRF.DDt(U)
+        // + turbulence->divDevReff(U) // Since we are using a custom turbulence, we have to express this fully
+        - fvc::div(nuEff * dev2(Foam::T(fvc::grad(U)))) - fvm::laplacian(nuEff, U) ==
+    fvOptions(U));
 fvOptions.constrain(UEqn);
-volVectorField Usrc = -fvc::reconstruct
-(
-    (
-        ghf * fvc::snGrad(rhok)
-        + fvc::snGrad(p_rgh)
-    ) * mesh.magSf()
-);
-UEqn.source() += Usrc;
