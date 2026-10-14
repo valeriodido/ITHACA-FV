@@ -46,40 +46,31 @@ SourceFiles
 /*---------------------------------------------------------------------------*\
                         Class BoundaryConditions Declaration
 \*---------------------------------------------------------------------------*/
-
 /// Class where a general treatment of boundary conditions for ROMs is implemented
-/** The idea is to have the possibility to group temperature BC, velocity BC and have methods to interpolate them
- * in case of time-dependent BCs. Inside the ROM solution, an update of the BC is called via the method updateTimeDependentBC.
- *  In the future, maybe different time-dep expression can be implemented. */
+/*
+The idea is that one instance of this objects is creted for each field that needs bc
+*/
+
 class BoundaryConditions
 {
 private:
-    /// Matrix that stores the boundary conditions for temperature
-    Eigen::MatrixXd temperatureBCMatrix_;
+    /// Matrix that stores the BCs
+    Eigen::MatrixXd BCMatrix_;
 
-    /// Matrix that stores the boundary conditions for velocity
-    Eigen::MatrixXd velocityBCMatrix_;
+    /// Vector that stores the time instances at which the BCs change
+    Eigen::VectorXd timestepsBC_;
 
-    /// Vector that stores the time instances at which the temperature BCs change
-    Eigen::VectorXd timestepsTempBC_;
-
-    /// Vector that stores the time instances at which the velocity BCs change
-    Eigen::VectorXd timestepsVelBC_;
+    /// Boolean to know if time-dep
+    bool timeDep_ = false;
 
     /// Word that stores how to treat time-dependent BCs. At the moment only "linear" is implemented
     word timeDepMethod_;
 
-    /// Boolean to know if there are temperature BCs
-    bool hasTemperatureBC_ = false;
+    /// Vector that stores the current velocity BCs
+    Eigen::VectorXd currentBC_;
 
-    /// Boolean to know if there are velocity BCs
-    bool hasVelocityBC_ = false;
-
-    /// Boolean to know if temperature BCs are time-dependent
-    bool temperatureTimeDep_ = false;
-
-    /// Boolean to know if velocity BCs are time-dependent
-    bool velocityTimeDep_ = false;
+    /// Number of BCs
+    int nBCs_;
 
     /// @brief    Method to linearly interpolate a value between two values
     ///
@@ -89,21 +80,13 @@ private:
 public:
     // Constructors
     BoundaryConditions() { };
-    BoundaryConditions(const Eigen::MatrixXd& velocityBC,
-        const Eigen::MatrixXd& temperatureBC, word timeDepMethod);
-    BoundaryConditions(const Eigen::VectorXd& velocityBC,
-        const Eigen::VectorXd& temperatureBC);
-    BoundaryConditions(const word velocityBCFile, const word temperatureBCFile, word timeDepMethod = "linear");
+
+    BoundaryConditions(const Eigen::MatrixXd& BCMatrix,  word timeDepMethod);
+    BoundaryConditions(const Eigen::VectorXd& BCMatrix);
+    BoundaryConditions(const word BCFile, word timeDepMethod = "linear");
 
     // Destructor
     ~BoundaryConditions() { };
-
-    // Attributes
-    /// Vector that stores the current temperature BCs
-    Eigen::VectorXd currentTemperatureBC;
-
-    /// Vector that stores the current velocity BCs
-    Eigen::VectorXd currentVelocityBC;
 
     /// @brief    Method to update time-dependent boundary conditions
     ///
@@ -114,23 +97,16 @@ public:
     /// @brief    Returns the current BCs sequentially as a single Eigen::VectorXd, with the velocity BCs first and then the temperature BCs
     Eigen::VectorXd getCurrentBCs() const
     {
-        Eigen::VectorXd currentBCs(currentVelocityBC.size() +
-            currentTemperatureBC.size());
-        currentBCs << currentVelocityBC, currentTemperatureBC;
-        return currentBCs;
+        return currentBC_;
     }
 
     /// @brief    Corrects the first N_BC and N_BC_t coefficients of the reduced solution vector, so that
     ///           they match the current boundary conditions when using the lifting function approach.
     ///
     /// @param[in]  y The reduced coefficient vector to be corrected. Is a Eigen::VectorXd
-    /// @param[in]  N_BC Number of velocity boundary conditions
-    /// @param[in]  N_BC_t Number of temperature boundary conditions
-    /// @param[in]  problem The pointer to the FOM problem
-    /// @param[in]  Nphi_u Number of velocity modes
-    /// @param[in]  Nphi_prgh Number of pressure modes
-    void correctLiftingCoeffs(Eigen::VectorXd& y, const int N_BC, const int N_BC_t,
-        const int Nphi_u, const int Nphi_prgh);
+    /// @param[in]  segment_start The index of the first coefficient to be corrected. Is an int
+    
+    void correctLiftingCoeffs(Eigen::VectorXd& y, const int segment_start);
 };
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
