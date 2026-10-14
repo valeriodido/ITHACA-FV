@@ -105,7 +105,8 @@ void ReducedLSPGUnsteadyBBTurb::solveOnline(
         mkDir(folder);
         ITHACAutilities::createSymLink(folder);
     }
-    boundaryConditions_ = BoundaryConditions { bcROM, bcROMT, "linear" };
+    boundaryConditionsU_ = BoundaryConditions { bcROM, "linear" };
+    boundaryConditionsT_ = BoundaryConditions { bcROMT, "linear" };
     const GaussNewtonSettings gn_settings = GaussNewtonSettings { 5, 1e-3, 1e-7 };
     Time& runTime = this->runTime();
 #include "readTimeControls.H"
@@ -133,7 +134,8 @@ void ReducedLSPGUnsteadyBBTurb::solveOnline(
     {
         runTime++;
         Info << "Time = " << runTime.time().value() << nl << endl;
-        boundaryConditions_.updateTimeDependentBC(runTime.time().value());
+        boundaryConditionsU_.updateTimeDependentBC(runTime.time().value());
+        boundaryConditionsT_.updateTimeDependentBC(runTime.time().value());
 
         Eigen::VectorXd scaledState = currentState_.cwiseQuotient(stateScaling_);
         Eigen::LevenbergMarquardtSpace::Status status = lm.minimizeInit(scaledState);
@@ -270,29 +272,33 @@ void ReducedLSPGUnsteadyBBTurb::reconstructReducedFields(
     phi_field = Phimodes_.reconstruct(phi_field, state.head(numberOfModes_.velocity), "phi_r");
     temperature_field = Tmodes_.reconstruct(temperature_field, state.tail(numberOfModes_.temperature), "T_r");
     pressure_field = Prghmodes_.reconstruct(pressure_field, state.segment(numberOfModes_.velocity, numberOfModes_.pressure), "p_rgh_r", false);
+    
+    const Eigen::VectorXd& bcsU = boundaryConditionsU_.getCurrentBCs();
+    const Eigen::VectorXd& bcsT = boundaryConditionsT_.getCurrentBCs();
+    Eigen::VectorXd aggregatedBCs = Eigen::VectorXd(bcsU.size() + bcsT.size());
+    aggregatedBCs << bcsU, bcsT;
+    
     if (romSettings_.bcMethod == "lift")
     {
-        const Eigen::VectorXd& bcs = boundaryConditions_.getCurrentBCs();
         for (label i = 0; i < inletIndex_.rows(); ++i)
         {
             const label patchID = inletIndex_(i, 0);
             const label cmpt = inletIndex_(i, 1);
             vector velBC = { 0.0, 0.0, 0.0 };
-            velBC[cmpt] = bcs(i);
+            velBC[cmpt] = bcsU(i);
             ITHACAutilities::assignBC(velocity_field, patchID, velBC);
-            velocity_field += liftFields_[i] * bcs(i);
-            phi_field += liftFieldsPhi_[i] * bcs(i);
+            velocity_field += liftFields_[i] * bcsU(i);
+            phi_field += liftFieldsPhi_[i] * bcsU(i);
         }
         for (label i = 0; i < inletIndexT_.rows(); ++i)
         {
             const label patchID = inletIndexT_(i, 0);
-            ITHACAutilities::assignBC(temperature_field, patchID, boundaryConditions_.getCurrentBCs()(i + liftFields_.size()));
-            temperature_field += liftFieldsT_[i] * boundaryConditions_.getCurrentBCs()(i + liftFields_.size());
+            ITHACAutilities::assignBC(temperature_field, patchID, bcsT(i));
+            temperature_field += liftFieldsT_[i] * bcsT(i);
         }
     } else if (romSettings_.snapshotCollectionMethod == 1) // Consistent method by carlberg, snapshots are centered to their initial condition for the offline trajectories
     {
-        const Eigen::VectorXd& bcs = boundaryConditions_.getCurrentBCs();
-        const Eigen::VectorXd weights = interpolateIDW(bcs.head(3));
+        const Eigen::VectorXd weights = interpolateIDW(aggregatedBCs);
         for (int k = 0; k < weights.size(); k++)
         {
             velocity_field += weights(k) * U0field_[k];
@@ -305,14 +311,14 @@ void ReducedLSPGUnsteadyBBTurb::reconstructReducedFields(
             const label patchID = inletIndex_(i, 0);
             const label cmpt = inletIndex_(i, 1);
             vector velBC = { 0.0, 0.0, 0.0 };
-            velBC[cmpt] = bcs(i);
+            velBC[cmpt] = bcsU(i);
             ITHACAutilities::assignBC(velocity_field, patchID, velBC);
             phi_field.boundaryFieldRef()[patchID] = velocity_field.boundaryField()[patchID] & velocity_field.mesh().Sf().boundaryField()[patchID];
         }
         for (label i = 0; i < inletIndexT_.rows(); ++i)
         {
             const label patchID = inletIndexT_(i, 0);
-            ITHACAutilities::assignBC(temperature_field, patchID, bcs(i + inletIndex_.rows()));
+            ITHACAutilities::assignBC(temperature_field, patchID, bcsT(i));
         }
     }
     if (correctBCs) // On the first iteration, calling correctBoundaryConditions() raises the --> FOAM FATAL ERROR: updateCoeffs(const scalarField& snGradp) MUST be called ...
@@ -384,15 +390,15 @@ void ReducedLSPGUnsteadyBBTurb::initializePODCoeffsFromFields()
     {
         for (int i = 0; i < liftFields_.size(); i++)
         {
-            U -= boundaryConditions_.getCurrentBCs()(i) * liftFields_[i];
+            U -= boundaryConditionsU_.getCurrentBCs()(i) * liftFields_[i];
         }
         for (int i = 0; i < liftFieldsT_.size(); i++)
         {
-            T -= boundaryConditions_.getCurrentBCs()(i + liftFields_.size()) * liftFieldsT_[i];
+            T -= boundaryConditionsT_.getCurrentBCs()(i) * liftFieldsT_[i];
         }
     } else if (romSettings_.snapshotCollectionMethod == 1) // Snapshots obtained by subtracting the initial snapshot
     {
-        const Eigen::VectorXd weights = interpolateIDW(boundaryConditions_.getCurrentBCs().head(3));
+        const Eigen::VectorXd weights = interpolateIDW(boundaryConditionsU_.getCurrentBCs().head(3));
         for (int k = 0; k < weights.size(); k++)
         {
             Info << "Weight of the trajectory " << k << " is " << weights(k) << endl;
@@ -406,7 +412,7 @@ void ReducedLSPGUnsteadyBBTurb::initializePODCoeffsFromFields()
     currentState_.segment(numberOfModes_.velocity, numberOfModes_.pressure) = ITHACAutilities::getCoeffs(p_rgh, Prghmodes_);
     currentState_.tail(numberOfModes_.temperature) = ITHACAutilities::getCoeffs(T, Tmodes_);
     currentNutCoeffs_ = ITHACAutilities::getCoeffs(nutFields_[0], Nutmodes_);
-    currentNutAvgCoeffs_ = interpolateIDW(boundaryConditions_.getCurrentBCs().head(3));
+    currentNutAvgCoeffs_ = interpolateIDW(boundaryConditionsU_.getCurrentBCs().head(3));
 }
 
 

@@ -211,8 +211,11 @@ private:
     ///- Number of modes for the reduced problem
     NumberOfModes numberOfModes_;
 
-    ///- Boundary conditions for the reduced problem
-    BoundaryConditions boundaryConditions_;
+    ///- Boundary conditions for velocity
+    BoundaryConditions boundaryConditionsU_;
+
+    ///- Boundary conditions for temperature
+    BoundaryConditions boundaryConditionsT_;
 
     ///- Current nut coefficients vector (fluctuating part)
     Eigen::VectorXd currentNutCoeffs_;
