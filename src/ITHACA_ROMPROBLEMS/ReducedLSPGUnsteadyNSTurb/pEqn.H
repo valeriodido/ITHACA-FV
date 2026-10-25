@@ -43,4 +43,6 @@ fvScalarMatrix pEqn
 (
     fvm::laplacian(rAU, p) == fvc::div(phiHbyA)
 );
+
 pEqn.setReference(_pRefCell, _pRefValue);
+p.correctBoundaryConditions();

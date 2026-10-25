@@ -1,5 +1,6 @@
 #include "ITHACAassert.H"
 #include "BlockResidual.H"
+#include "fvCFD.H"
 
 BlockResidual::BlockResidual(std::vector<BlockSpec> specs)
 {
@@ -126,6 +127,11 @@ void BlockResidual::calibrateWeights(double minRelative)
   }
 
   isScaled_ = false;
+  Foam::Info << "BlockResidual: calibrated weights:" << Foam::nl;
+  for (std::size_t i = 0; i < nBlocks; ++i)
+  {
+    Foam::Info << "  Block " << blocks_[i].name << ": weight = " << blocks_[i].weight << Foam::nl;
+  }
 }
 
 void BlockResidual::applyScaling() const

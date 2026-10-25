@@ -44,6 +44,7 @@ SourceFiles
 #include <ReducedLSPG.H>
 #include <unsupported/Eigen/NonLinearOptimization>
 #include <unsupported/Eigen/NumericalDiff>
+#include <Eigen/IterativeLinearSolvers>
 
 /// @brief Functor class for the Levenberg-Marquardt algorithm using Eigen's Levenberg-Marquardt implementation.
 struct LevenbergMarquardtFunctor

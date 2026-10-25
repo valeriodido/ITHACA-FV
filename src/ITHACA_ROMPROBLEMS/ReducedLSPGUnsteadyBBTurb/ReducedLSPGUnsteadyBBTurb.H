@@ -135,12 +135,6 @@ private:
     /// The method reads the fields from disk and projects them onto the modes to get the initial coefficients
     void initializePODCoeffsFromFields();
 
-    ///- Manual assembly of the jacobian
-    void assembleJacobian(const Eigen::VectorXd& state,
-    const Eigen::VectorXd& residual,
-    Eigen::MatrixXd& jacobian,
-    const Time& runTime);
-
 private:
     //- Parameters for the offline solution
     Eigen::MatrixXd mu_;

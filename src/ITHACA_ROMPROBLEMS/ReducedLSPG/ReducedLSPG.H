@@ -50,7 +50,9 @@ struct ROMSettings {
     word romID = "";
     //- Specifier on how the snapshots were collected. Affects the reconstruction
     label snapshotCollectionMethod = 1;
-    bool scaleResidualWithCellVolume = false;
+    bool scaleResidualWithCellVolume = true;
+    //- Debug flag
+    bool debug_ = false;
 };
 
 /*
@@ -74,7 +76,16 @@ public:
     virtual ~ReducedLSPG() = default;
 
     /// @brief Virtual function to be overridden to assemble the residual
-    virtual Eigen::VectorXd assembleResidual(const Eigen::VectorXd& state, const bool correctBCs = true, const bool writeResidual = false) = 0;
+    virtual Eigen::VectorXd assembleResidual(
+      const Eigen::VectorXd& state,
+      const bool correctBCs = true,
+      const bool writeResidual = false) = 0;
+
+    /// @brief Manual assembly of the jacobian
+    void assembleJacobian(const Eigen::VectorXd& state,
+    const Eigen::VectorXd& residual,
+    Eigen::MatrixXd& jacobian,
+    const Time& runTime);
 
     /// @brief Initializes the POD coefficients from the current fields in memory
     virtual void initializePODCoeffsFromFields() = 0;
@@ -152,7 +163,8 @@ protected:
 
     //- Number of cell elements
     label nCells;
-};
+
+  };
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 

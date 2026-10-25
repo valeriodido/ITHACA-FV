@@ -191,9 +191,6 @@ _rhok = autoPtr<volScalarField>(
         1.0 - beta * (T - TRef)));
 volScalarField& rhok = _rhok();
 
-// kinematic turbulent thermal conductivity m2/s
-Info << "Reading field alphat\n"
-     << endl;
 _alphat = autoPtr<volScalarField>(
     new volScalarField(
         IOobject(

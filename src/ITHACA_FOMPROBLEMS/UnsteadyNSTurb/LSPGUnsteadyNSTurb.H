@@ -194,6 +194,12 @@ private:
     //- Number of eddy viscosity modes
     label NNutModes_;
 
+    //- Number of kinetic energy modes
+    label NkModes_;
+
+    //- Number of omega modes
+    label NomegaModes_;
+
     ///- Reference cell for pressure
     label  _pRefCell;
     scalar _pRefValue;
@@ -203,6 +209,9 @@ private:
 
     /// Identifier for bcMethod, which can be "lift" or "none"
     word bcMethod;
+
+    /// Turbulence model. Currently only kOmegaSST is implemented.
+    word turbulenceModel;
 
     /// Snapshot collection procedure. If 1, the parameter-mean is subtracted from the snapshots.
     label snapshotCollectionMethod;
@@ -263,8 +272,14 @@ public:
     /// Snapshots for turbulent kinetic energy
     PtrList<volScalarField> kfield;
 
+    /// Initial conditions for turbulent kinetic energy
+    PtrList<volScalarField> k0field;
+
     /// Snapshots for omega
     PtrList<volScalarField> omegafield;
+
+    /// Initial conditions for omega
+    PtrList<volScalarField> omega0field;
 
     //- Velocity POD modes
     volVectorModes Umodes;

@@ -54,13 +54,33 @@ ReducedLSPG::ReducedLSPG(std::shared_ptr<ITHACAcontext> context): context_(std::
         ITHACAdict->lookupOrDefault<word>("bcMethod", "lift"),
         ITHACAdict->lookupOrDefault<word>("romID", ""),
         ITHACAdict->lookupOrDefault<label>("snapshotCollectionMethod", 1),
-        ITHACAdict->lookupOrDefault<bool>("scaleResidualWithCellVolume", false)
+        ITHACAdict->lookupOrDefault<bool>("scaleResidualWithCellVolume", true),
+        ITHACAdict->lookupOrDefault<bool>("debug", false)
     };
 
     M_Assert(romSettings_.bcMethod == "lift" || romSettings_.bcMethod == "None", "Invalid bcMethod specified in ITHACAdict. Valid options are 'lift' or 'none'.");
     M_Assert(romSettings_.bcMethod == "None" || romSettings_.snapshotCollectionMethod == 0, "If using bcMethod 'lift', snapshotCollectionMethod must be set to 0 in ITHACAdict.");
     nCells = mesh().nCells();
-  }
+}
+
+void ReducedLSPG::assembleJacobian(const Eigen::VectorXd& state,
+    const Eigen::VectorXd& residual,
+    Eigen::MatrixXd& jacobian,
+    const Time& runTime)
+{
+    const double eps = 1e-6;
+    const double absoluteFloor_ = 1e-8;
+
+    for (int i = 0; i < state.size(); i++)
+    {
+        const double h = std::sqrt(eps) * std::max({ std::abs(state[i]), absoluteFloor_ });
+        Eigen::VectorXd state_plus = state;
+        state_plus[i] += h;
+        const Eigen::VectorXd residual_plus = assembleResidual(state_plus);
+        jacobian.col(i) = (residual_plus - residual) / h;
+    }
+    return;
+}
 
 template<class Type>
 void ReducedLSPG::writeResidualField(
@@ -99,7 +119,7 @@ void ReducedLSPG::writeResidualField(
     }
     res.correctBoundaryConditions();
 
-    res.write();   // write() is unconditional, so it ignores runTime.writeTime()
+    res.write();
 }
 // Template instantiation for the types we expect to use
 template void ReducedLSPG::writeResidualField<scalar>(

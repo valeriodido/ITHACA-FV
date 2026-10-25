@@ -107,13 +107,14 @@ void ReducedLSPGUnsteadyBBTurb::solveOnline(
     }
     boundaryConditionsU_ = BoundaryConditions { bcROM, "linear" };
     boundaryConditionsT_ = BoundaryConditions { bcROMT, "linear" };
+    Info << "Created boundary conditions objects for U and T" << endl;
     const GaussNewtonSettings gn_settings = GaussNewtonSettings { 5, 1e-3, 1e-7 };
     Time& runTime = this->runTime();
 #include "readTimeControls.H"
 
     initializePODCoeffsFromFields(); // Here we cannot correct the BCs for pRgh
     assembleResidual(currentState_, false); // Here we cannot correct the BCs for pRgh
-
+    
     Info << "Initial residual norm: " << residualWorkspace_.vector().norm() << nl
          << "  - U residual norm " << residualWorkspace_.blockNorm(iU_) << nl
          << "  - p_rgh residual norm " << residualWorkspace_.blockNorm(iP_) << nl
@@ -164,7 +165,8 @@ void ReducedLSPGUnsteadyBBTurb::solveOnline(
         assembleResidual(currentState_);
         Info << "  - U residual norm " << residualWorkspace_.blockNorm(iU_) << nl
              << "  - p_rgh residual norm " << residualWorkspace_.blockNorm(iP_) << nl
-             << "  - T residual norm " << residualWorkspace_.blockNorm(iT_) << endl;
+             << "  - T residual norm " << residualWorkspace_.blockNorm(iT_) << nl
+             << "  - max(div(phi)) = " << max(mag(fvc::div(_phi()))).value() << endl;
 
         if (runTime.writeTime())
         {
@@ -215,24 +217,6 @@ Eigen::VectorXd ReducedLSPGUnsteadyBBTurb::assembleResidual(
     return residualWorkspace_.vector();
 }
 
-void ReducedLSPGUnsteadyBBTurb::assembleJacobian(const Eigen::VectorXd& state,
-    const Eigen::VectorXd& residual,
-    Eigen::MatrixXd& jacobian,
-    const Time& runTime)
-{
-    const double eps = 1e-6;
-    const double absoluteFloor_ = 1e-8;
-
-    for (int i = 0; i < state.size(); i++)
-    {
-        const double h = std::sqrt(eps) * std::max({ std::abs(state[i]), absoluteFloor_ });
-        Eigen::VectorXd state_plus = state;
-        state_plus[i] += h;
-        const Eigen::VectorXd residual_plus = assembleResidual(state_plus);
-        jacobian.col(i) = (residual_plus - residual) / h;
-    }
-    return;
-}
 
 Eigen::VectorXd ReducedLSPGUnsteadyBBTurb::residualWithCurrentFields()
 {
@@ -313,7 +297,8 @@ void ReducedLSPGUnsteadyBBTurb::reconstructReducedFields(
             vector velBC = { 0.0, 0.0, 0.0 };
             velBC[cmpt] = bcsU(i);
             ITHACAutilities::assignBC(velocity_field, patchID, velBC);
-            phi_field.boundaryFieldRef()[patchID] = velocity_field.boundaryField()[patchID] & velocity_field.mesh().Sf().boundaryField()[patchID];
+            // This is quite risky
+            // phi_field.boundaryFieldRef()[patchID] = velocity_field.boundaryField()[patchID] & velocity_field.mesh().Sf().boundaryField()[patchID];
         }
         for (label i = 0; i < inletIndexT_.rows(); ++i)
         {
@@ -386,11 +371,15 @@ void ReducedLSPGUnsteadyBBTurb::initializePODCoeffsFromFields()
     volScalarField& p_rgh = _p_rgh();
     volScalarField& T = _T();
     surfaceScalarField& phi = _phi();
+    Eigen::VectorXd aggregatedBCs = Eigen::VectorXd(boundaryConditionsU_.getCurrentBCs().size() + boundaryConditionsT_.getCurrentBCs().size());
+    aggregatedBCs << boundaryConditionsU_.getCurrentBCs(), boundaryConditionsT_.getCurrentBCs();
+
     if (romSettings_.bcMethod == "lift")
     {
         for (int i = 0; i < liftFields_.size(); i++)
         {
             U -= boundaryConditionsU_.getCurrentBCs()(i) * liftFields_[i];
+            phi -= boundaryConditionsU_.getCurrentBCs()(i) * liftFieldsPhi_[i];
         }
         for (int i = 0; i < liftFieldsT_.size(); i++)
         {
@@ -398,7 +387,7 @@ void ReducedLSPGUnsteadyBBTurb::initializePODCoeffsFromFields()
         }
     } else if (romSettings_.snapshotCollectionMethod == 1) // Snapshots obtained by subtracting the initial snapshot
     {
-        const Eigen::VectorXd weights = interpolateIDW(boundaryConditionsU_.getCurrentBCs().head(3));
+        const Eigen::VectorXd weights = interpolateIDW(aggregatedBCs);
         for (int k = 0; k < weights.size(); k++)
         {
             Info << "Weight of the trajectory " << k << " is " << weights(k) << endl;
@@ -412,7 +401,7 @@ void ReducedLSPGUnsteadyBBTurb::initializePODCoeffsFromFields()
     currentState_.segment(numberOfModes_.velocity, numberOfModes_.pressure) = ITHACAutilities::getCoeffs(p_rgh, Prghmodes_);
     currentState_.tail(numberOfModes_.temperature) = ITHACAutilities::getCoeffs(T, Tmodes_);
     currentNutCoeffs_ = ITHACAutilities::getCoeffs(nutFields_[0], Nutmodes_);
-    currentNutAvgCoeffs_ = interpolateIDW(boundaryConditionsU_.getCurrentBCs().head(3));
+    currentNutAvgCoeffs_ = interpolateIDW(aggregatedBCs);
 }
 
 
