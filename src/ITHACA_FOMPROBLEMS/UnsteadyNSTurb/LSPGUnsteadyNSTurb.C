@@ -75,20 +75,27 @@ void LSPGUnsteadyNSTurb::readITHACAdict()
 {
     bcMethod = ITHACAdict->lookupOrDefault<word>("bcMethod", "None");
     snapshotCollectionMethod = ITHACAdict->lookupOrDefault<label>("snapshotCollectionMethod", 0);
+    turbulenceModel = ITHACAdict->lookupOrDefault<word>("turbulenceModel", "kOmegaSST");
 
     M_Assert(bcMethod == "lift" || bcMethod == "None", "The BC method must be set to 'lift' or 'None' in ITHACAdict. Other methods are not implemented yet.");
     M_Assert(snapshotCollectionMethod == 0 || snapshotCollectionMethod == 1, "The snapshot collection method must be either 0 (no IC subtraction) or 1 (IC subtraction).");
     M_Assert(bcMethod == "None" || snapshotCollectionMethod == 0, "If the BC method is set to lift, the snapshot collection method must be set to 0 (no IC subtraction).");
+    M_Assert(turbulenceModel == "kOmegaSST" || turbulenceModel == "RBF", "The turbulence model must be set to 'kOmegaSST' or 'RBF' in ITHACAdict. Other models are not implemented yet.");
+
 
     NUmodes_ = ITHACAdict->lookupOrDefault<label>("NmodesUproj", 5);
     NPmodes_ = ITHACAdict->lookupOrDefault<label>("NmodesPproj", 5);
     NNutModes_ = ITHACAdict->lookupOrDefault<label>("NmodesNutproj", 5);
+    NkModes_ = ITHACAdict->lookupOrDefault<label>("NmodesKproj", 5);
+    NomegaModes_ = ITHACAdict->lookupOrDefault<label>("NmodesOmegaproj", 5);
 
     Info << "### INFO ### " << nl
          << "BC method: " << bcMethod << nl
          << "Number of velocity modes for projection: " << NUmodes_ << nl
          << "Number of pressure modes for projection: " << NPmodes_ << nl
-         << "Number of eddy viscosity modes for projection: " << NNutModes_ << endl;
+         << "Number of eddy viscosity modes for projection: " << NNutModes_ << nl
+         << "Number of turbulent kinetic energy modes for projection: " << NkModes_ << nl
+         << "Number of omega modes for projection: " << NomegaModes_ << endl;
 }
 
 // * * * * * * * * * * * * * * Full Order Methods * * * * * * * * * * * * * * //
@@ -288,10 +295,6 @@ void LSPGUnsteadyNSTurb::offlineRBFInterpolation()
             inputModes); // Returns a [modes x snapshots]
     }
 
-    Info << "Shape of the L2 velocity coeff matrix: " << coeffL2vel.rows() << " x "
-         << coeffL2vel.cols() << nl
-         << "Shape of the L2 eddy viscosity coeff matrix: " << coeffL2nut.rows() << " x " << coeffL2nut.cols() << endl;
-
     List<Eigen::MatrixXd> velDerCoeff(2);
     // Returns a list of two matrices: [0] = velocity derivative coeffs, [1] = eddy viscosity coeffs. Each matrix is [snapshots x coeffs]
     if (derivativeInRBF)
@@ -427,7 +430,6 @@ void LSPGUnsteadyNSTurb::splitEddyViscositySnapshots()
         }
     } else
     {
-        Info << "avgNutfield.size() = " << avgNutfield.size() << ", Nut0field.size() = " << Nut0field.size() << endl;
         M_Assert(avgNutfield.size() == Nut0field.size(), "avgNutfield and Nut0field must have the same size when using snapshotCollectionMethod 1.");
         M_Assert(fluctNutfield.size() == Nutfield.size(), "fluctNutfield and Nutfield must have the same size when using snapshotCollectionMethod 1.");
 
@@ -497,14 +499,16 @@ void LSPGUnsteadyNSTurb::resizeModes()
     nutmodes.resize(NNutModes_);
     Pmodes.resize(NPmodes_);
     Phimodes.resize(NUmodes_);
-    omegamodes.resize(NNutModes_);
-    kmodes.resize(NNutModes_);
+    kmodes.resize(NkModes_);
+    omegamodes.resize(NomegaModes_);
 }
 
 void LSPGUnsteadyNSTurb::computePOD()
 {
     int nModesU = ITHACAdict->lookupOrDefault<int>("NmodesUout", 0);
     int nModesP = ITHACAdict->lookupOrDefault<int>("NmodesPout", 0);
+    int nModesK = ITHACAdict->lookupOrDefault<int>("NmodesKout", 0);
+    int nModesOmega = ITHACAdict->lookupOrDefault<int>("NmodesOmegaout", 0);
     int nModesNut = ITHACAdict->lookupOrDefault<int>("NmodesNutout", 0);
     if (bcMethod == "lift")
     {
@@ -516,9 +520,9 @@ void LSPGUnsteadyNSTurb::computePOD()
         ITHACAPOD::getModes(Ufield, Umodes, _U().name(), podex, 0, 0, nModesU, true);
         getPhiModes(Umodes, Ufield, Phimodes, Phifield);
     }
-    ITHACAPOD::getModes(omegafield, omegamodes, "omega", podex, 0, 0, nModesNut, false);
-    ITHACAPOD::getModes(kfield, kmodes, "k", podex, 0, 0, nModesNut, false);
-    ITHACAPOD::getModes(Pfield, Pmodes, _p().name(), podex, 0, 0, nModesP, false);
+    ITHACAPOD::getModes(omegafield, omegamodes, "omega", podex, 0, 0, nModesOmega, false);
+    ITHACAPOD::getModes(kfield, kmodes, "k", podex, 0, 0, nModesK, true);
+    ITHACAPOD::getModes(Pfield, Pmodes, _p().name(), podex, 0, 0, nModesP, true);
     ITHACAPOD::getModes(fluctNutfield, nutmodes, fluctNutfield[0].name(), podex, 0, 0, nModesNut, true);
     // Assert that the modes are not empty
     M_Assert(Umodes.size() > 0, "Velocity modes are empty.");
@@ -580,7 +584,6 @@ void LSPGUnsteadyNSTurb::getPhiModes(
     Info << "### MESSAGE - Computing phi modes from velocity modes." << endl;
     Phimodes.setSize(Umodes.size());
     // The phi modes are computed directly from the velocity modes, to avoid differences due to inner products
-    // Φ_i = Σₙ W^U_ni · phi_hom^n (lol LLM maths)
     Eigen::MatrixXd WU = ITHACAutilities::getCoeffs(Uomfield, Umodes).transpose();
     for (label i = 0; i < WU.cols(); i++)
     {
@@ -696,6 +699,8 @@ void LSPGUnsteadyNSTurb::switchOffAutoWrite()
     _U->writeOpt(IOobject::NO_WRITE);
     _p->writeOpt(IOobject::NO_WRITE);
     _nut->writeOpt(IOobject::NO_WRITE);
+    _k->writeOpt(IOobject::NO_WRITE);
+    _omega->writeOpt(IOobject::NO_WRITE);
 }
 
 void LSPGUnsteadyNSTurb::loadFieldsFromDisk(
@@ -723,15 +728,18 @@ void LSPGUnsteadyNSTurb::prepareSnapshots()
             Phi0field.set(i, Phifield[i * timeSnapshots[i].size()].clone());
             P0field.set(i, Pfield[i * timeSnapshots[i].size()].clone());
             Nut0field.set(i, Nutfield[i * timeSnapshots[i].size()].clone());
+            k0field.set(i, kfield[i * timeSnapshots[i].size()].clone());
+            omega0field.set(i, omegafield[i * timeSnapshots[i].size()].clone());
             for (label j = 0; j < timeSnapshots[i].size(); j++)
             {
                 Ufield[i * timeSnapshots[i].size() + j] -= U0field[i];
                 Pfield[i * timeSnapshots[i].size() + j] -= P0field[i];
                 Nutfield[i * timeSnapshots[i].size() + j] -= Nut0field[i];
                 Phifield[i * timeSnapshots[i].size() + j] -= Phi0field[i];
+                kfield[i * timeSnapshots[i].size() + j] -= k0field[i];
+                omegafield[i * timeSnapshots[i].size() + j] -= omega0field[i];
             }
         }
-        Info << "### MESSAGE - Centering of snapshots around initial condition completed." << endl;
     }
 }
 
@@ -750,6 +758,8 @@ void LSPGUnsteadyNSTurb::prepareParametersMu(const word& velocity_file)
         Phi0field.setSize(Tnumber);
         P0field.setSize(Tnumber);
         Nut0field.setSize(Tnumber);
+        k0field.setSize(Tnumber);
+        omega0field.setSize(Tnumber);
     }
     setParameters(); // Sets mu to be (Pnumber x Tnumber)
 

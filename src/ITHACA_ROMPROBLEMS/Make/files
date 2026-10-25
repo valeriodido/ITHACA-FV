@@ -20,5 +20,7 @@ ReducedLSPGUnsteadyNSTurb/ReducedLSPGUnsteadyNSTurb.C
 ReducedLSPG/ReducedLSPG.C
 ReducedLSPG/BlockResidual.C
 NonLinearSolvers/LevenbergMarquardt.C
+TurbulenceModels/ResidualTurbulenceModel.C
+TurbulenceModels/ITHACAkOmegaSST.C
 
 LIB = $(FOAM_USER_LIBBIN)/libITHACA_ROMPROBLEMS

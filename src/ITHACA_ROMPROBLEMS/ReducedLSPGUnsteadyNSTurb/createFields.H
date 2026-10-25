@@ -73,7 +73,7 @@ _phi = autoPtr<surfaceScalarField>(
             "phi_r",
             runTime.timeName(),
             mesh,
-            IOobject::READ_IF_PRESENT,
+            IOobject::NO_READ,
             IOobject::AUTO_WRITE),
         linearInterpolate(U) & mesh.Sf()));
 surfaceScalarField& phi = _phi();
@@ -82,10 +82,10 @@ surfaceScalarField& phi = _phi();
 _p = autoPtr<volScalarField>(
     new volScalarField(
         IOobject(
-            "p",
+            "p_r",
             runTime.timeName(),
             mesh,
-            IOobject::NO_READ,
+            IOobject::MUST_READ,
             IOobject::AUTO_WRITE
           ),
         mesh
@@ -96,12 +96,6 @@ volScalarField& p = _p();
 _laminarTransport = autoPtr<singlePhaseTransportModel>(
     new singlePhaseTransportModel(U, phi));
 singlePhaseTransportModel& laminarTransport = _laminarTransport();
-
-// turbulence = autoPtr<incompressible::turbulenceModel>(
-//                  incompressible::turbulenceModel::New(U, phi, laminarTransport));
-turbulence = autoPtr<RBFTurbulence>(
-    new RBFTurbulence(nut, nu));
-
 
 _pRefCell = 0;
 _pRefValue = 0.0;

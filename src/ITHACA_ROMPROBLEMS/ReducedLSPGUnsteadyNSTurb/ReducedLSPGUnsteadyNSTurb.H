@@ -41,6 +41,8 @@ SourceFiles
 #include "fvCFD.H"
 #include "singlePhaseTransportModel.H"
 #include "turbulentTransportModel.H"
+#include "ResidualTurbulenceModel.H"
+#include "ITHACAkOmegaSST.H"
 #include "ITHACAcontext.H"
 #include "ithacaInterpolator.H"
 #include "LSPGUnsteadyNSTurb.H"
@@ -61,7 +63,8 @@ struct InterpolationSettings {
 struct NumberOfModes {
     int velocity;
     int pressure;
-    int nut;
+    int k;
+    int omega;
 };
 
 struct GaussNewtonSettings {
@@ -96,7 +99,9 @@ private:
     void captureFOMData(const LSPGUnsteadyNSTurb& problem);
 
     //- Assembles the residual vector
-    Eigen::VectorXd assembleResidual(const Eigen::VectorXd& state, const bool correctBCs = true, const bool writeResidual = false) override;
+    Eigen::VectorXd assembleResidual(const Eigen::VectorXd& state,
+        const bool correctBCs = true,
+        const bool writeResidual = false) override;
 
     //- Assembles the residual vector using the current fields in memory
     Eigen::VectorXd residualWithCurrentFields();
@@ -115,6 +120,8 @@ private:
         volScalarModes& nut_modes,
         const Eigen::VectorXd& state);
 
+    void createTurbulenceModel();
+
     //- Inverse Distance Weighting interpolation of the input parameters to get the current state vector
     Eigen::VectorXd interpolateIDW(const Eigen::VectorXd& input_parameters);
 
@@ -125,18 +132,15 @@ private:
     /// The method reads the fields from disk and projects them onto the modes to get the initial coefficients
     void initializePODCoeffsFromFields();
 
-    ///- Manual assembly of the jacobian
-    void assembleJacobian(const Eigen::VectorXd& state,
-    const Eigen::VectorXd& residual,
-    Eigen::MatrixXd& jacobian,
-    const Time& runTime);
-
 private:
     //- Parameters for the offline solution
     Eigen::MatrixXd mu_;
 
     //- Inlet Patch indices for velocity lifting
     Eigen::MatrixXi inletIndex_;
+
+    //- Old state vector, used in the RBF interpolation if requested
+    Eigen::VectorXd oldState_;
 
     //- RBF for the interpolation
     std::vector<std::shared_ptr<ithacaInterpolator>> rbfSplines_;
@@ -177,6 +181,12 @@ private:
     //- Eddy viscosity initial conditions
     PtrList<volScalarField> Nut0field_;
 
+    //- Turbulent kinetic energy initial conditions
+    PtrList<volScalarField> k0field_;
+
+    //- Turbulent omega initial conditions
+    PtrList<volScalarField> omega0field_;
+
     //- Fluctuating eddy viscosity fields
     PtrList<volScalarField> nutFields_;
 
@@ -205,6 +215,12 @@ private:
     ///- Pointer to the turbulent viscosity field
     autoPtr<volScalarField> _nut;
 
+    ///- Pointer to the turbulent kinetic energy field
+    autoPtr<volScalarField> _k;
+
+    ///- Pointer to the turbulent omega field
+    autoPtr<volScalarField> _omega;
+
     ///- Pointer to the reduced velocity field
     autoPtr<volVectorField> _U;
 
@@ -215,8 +231,9 @@ private:
     autoPtr<singlePhaseTransportModel> _laminarTransport;
 
     ///- Turbulent transport pointer
-    // autoPtr<incompressible::turbulenceModel> turbulence; // For conformity, can we rename this to _...?
-    autoPtr<RBFTurbulence> turbulence;
+    // autoPtr<RBFTurbulence> turbulence;
+    // autoPtr<ITHACATurbulenceModels::<incompressible::turbulenceModel>> turbulence;
+    autoPtr<ITHACATurbulenceModels::ResidualEddyViscosityTurbulenceModel> turbulence;
 
     ///- Pointer to the pressure field
     autoPtr<volScalarField> _p;
@@ -236,7 +253,14 @@ private:
     ///- Block index for U
     label iU_;
 
+    ///- Block index for p
     label iP_;
+
+    ///- Block index for k
+    label iK_;
+
+    ///- Block index for omega
+    label iOmega_;
 };
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
