@@ -100,6 +100,15 @@ class BlockResidual
     /// @param rowWeights Eigen::VectorXd of the per-entry weights to set. Must
     void setBlockRowWeights(int block_index, const Eigen::VectorXd& rowWeights);
 
+    /// @brief Returns the scalar weight of a specific block
+    double blockWeight(int block_index) const;
+
+    /// @brief Offset of a block in the residual vector
+    Eigen::Index blockOffset(int block_index) const;
+
+    /// @brief Number of rows of a block
+    Eigen::Index blockSize(int block_index) const;
+
     int numBlocks() const;
 
     /// @brief Calibrates the weights as 1/||block||

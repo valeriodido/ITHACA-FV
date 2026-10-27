@@ -7,3 +7,4 @@ cleanCase
 runApplication blockMesh
 runApplication snappyHexMesh -overwrite
 runApplication extrudeMesh
+touch case.foam

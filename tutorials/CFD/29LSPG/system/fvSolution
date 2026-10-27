@@ -20,7 +20,7 @@ FoamFile
 
 solvers
 {
-    "(p|pa)"
+    "(p)"
     {
         solver          GAMG;
         tolerance       1e-08;
@@ -34,7 +34,7 @@ solvers
         mergeLevels     1;
     }
 
-    "(U|Ua|k|epsilon|omega)"
+    "(U|k|omega)"
     {
         solver          smoothSolver;
         smoother        GaussSeidel;
@@ -43,7 +43,7 @@ solvers
         relTol          0.1;
     }
 
-    "(U|k|epsilon|omega)Final"
+    "(U|k|omega)Final"
     {
         $U;
         relTol          0;
@@ -52,20 +52,6 @@ solvers
     {
         $p;
         relTol          0;
-    }
-
-    "(nuTilda|nuTildaFinal)"
-    {
-        solver           GAMG;
-        tolerance        1e-7;
-        relTol           0.001;
-        smoother         GaussSeidel;
-        nPreSweeps       0;
-        nPostSweeps      2;
-        cacheAgglomeration on;
-        agglomerator     faceAreaPair;
-        nCellsInCoarsestLevel 10;
-        mergeLevels      1;
     }
 
     Usup
@@ -96,8 +82,15 @@ SIMPLE
 
 PIMPLE
 {
-    nNonOrthogonalCorrectors 1;
-    nCorrectors 3;
+    nNonOrthogonalCorrectors 2;
+    nOuterCorrectors 4;
+    nCorrectors 2;
+
+    // residualControl
+    // {
+    //     U       1e-4;
+    //     p       1e-4;
+    // }
 }
 
 potentialFlow
@@ -105,23 +98,18 @@ potentialFlow
     nNonOrthogonalCorrectors 10;
 }
 
-
 relaxationFactors
 {
-    p 0.3;
-    U 0.7;    
-
-    fields
-    {
-        "(p|pa)"        0.3;
-        alpha           0.1;
-    }
-    equations
-    {
-        "(U|Ua)"        0.7;
-        "(k|epsilon)"   0.7;
-    }
+    // fields
+    // {
+    //     p               0.3;
+    // }
+    // equations
+    // {
+    //     U               0.7;
+    //     k               0.7;
+    //     omega           0.7;
+    // }
 }
-
 
 // ************************************************************************* //

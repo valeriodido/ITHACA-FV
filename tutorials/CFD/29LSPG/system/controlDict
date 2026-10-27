@@ -4,9 +4,6 @@
 |  \\    /   O peration     | Version:  3.0.x                                 |
 |   \\  /    A nd           | Web:      www.OpenFOAM.org                      |
 |    \\/     M anipulation  |                                                 |
-|*---------------------------------------------------------------------------*|
-|  File created by CFD support s.r.o., Wed Jan 25 11:27:58 2017               |
-|                    http://www.cdfsupport.com                                |
 \*---------------------------------------------------------------------------*/
 FoamFile
 {
@@ -28,13 +25,13 @@ stopAt          endTime;
 
 endTime         5;
 
-deltaT          5e-02;
+deltaT          5e-2;     // = deltaT of the reference FOM (OnlineFOM01) and of the V1 trajectory
 
-writeControl    timeStep;
+writeControl    adjustableRunTime;
 
-writeInterval   2;
+writeInterval   0.2;
 
-purgeWrite      500;
+purgeWrite      0;
 
 writeFormat     ascii;
 
@@ -51,4 +48,63 @@ runTimeModifiable false;
 adjustTimeStep off; 
 
 maxCo 1;
+
+functions
+{
+liftAndDragROM
+{
+    type forceCoeffs;
+    libs (forces);
+
+    patches (cylinder1);
+
+    p p_r;
+    U U_r;
+
+    rho rhoInf;
+    rhoInf 1;
+
+    CofR (0 0 0);
+    pitchAxis (0 1 0);
+
+    dragDir (1 0 0);
+    liftDir (0 1 0);
+
+    magUInf 1;
+    lRef 1;
+    Aref 1;
+
+    log false;
+    writeControl adjustableRunTime;
+    writeInterval 0.1;
+}
+
+// liftAndDragFOM
+// {
+//     type forceCoeffs;
+//     libs (forces);
+
+//     patches (cylinder1);
+
+//     p p;
+//     U U;
+
+//     rho rhoInf;
+//     rhoInf 1;
+
+//     CofR (0 0 0);
+//     pitchAxis (0 1 0);
+
+//     dragDir (1 0 0);
+//     liftDir (0 1 0);
+
+//     magUInf 1;
+//     lRef 1;
+//     Aref 1;
+
+//     log false;
+//     writeControl adjustableRunTime;
+//     writeInterval 0.1;
+// }
+}
 // ************************************************************************* //

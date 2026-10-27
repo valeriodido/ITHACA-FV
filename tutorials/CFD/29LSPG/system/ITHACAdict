@@ -21,40 +21,43 @@ EigenSolver eigen;
 bcMethod None;
 snapshotCollectionMethod 1;
 
-romID B; // No bc, without scaling
+romID B;
 
 // Number of modes to output and to use for projection
-NmodesUout   30;
+NmodesUout   90;
 NmodesUproj  10;
-dimInputRBF 10; // The number of u modes used for the RBF interpolation
 
-NmodesPout 30;
-NmodesPproj 10;
+NmodesPout 90;
+NmodesPproj 5;
 
-NmodesNutout 30;
-NmodesNutproj 8;
+turbulenceModel kOmegaSST;
+
+NmodesKout 90;
+NmodesKproj 5;
+
+NmodesOmegaout 90;
+NmodesOmegaproj 5;
+
+NmodesNutout 90;
+NmodesNutproj 5;
+dimInputRBF 5; // The number of u modes used for the RBF interpolation
 
 // Wether the a time derivative are used in the RBF interpolation for nut.
 derivativeInRBF false;
-
-// Starting snapshot for the online phase
-startingSnapshot 0;
 
 // eddy viscosity coefficients computation method
 viscDict
 {
     package mathtoolbox; // mathtoolbox or splinter
     normalize true; // true or false, normalize data before interpolation
-
     // RBF parameters
     algorithm RBF; // RBF for splinter, RBF or GPR for mathtoolbox.
     kernel gaussian;
-    // RBF kernels: linear, cubic, quintic, thin_plate_spline,
-    // gaussian, multiquadric, inverse_multiquadric, inverse_quadratic
+    // RBF kernels: linear, cubic, quintic, thin_plate_spline, gaussian, multiquadric, inverse_multiquadric, inverse_quadratic
     regularization true; // true or false, only for mathtoolbox RBF
     polynomial false; // true or false, only for mathtoolbox RBF
-    lambda 5e-4; // regularization parameter, only for mathtoolbox RBF
-    epsilon 0.025;// shape parameter, for both mathtoolbox and splinter RBF. A higher epsilon lead to more localized
+    lambda 5e-3; // regularization parameter, only for mathtoolbox RBF
+    epsilon 0.01;// shape parameter, for both mathtoolbox and splinter RBF. A higher epsilon lead to more localized
 };
 
 // Output format to save market vectors.
