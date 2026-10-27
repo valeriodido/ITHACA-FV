@@ -1,0 +1,4 @@
+constant/polyMesh/*
+[1-9]*
+ModesReconstructTest.exe
+log.*

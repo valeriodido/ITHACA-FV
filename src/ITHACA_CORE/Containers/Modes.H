@@ -208,6 +208,29 @@ class Modes : public PtrList<GeometricField<Type, PatchField, GeoMesh >>
             bool correctBC = true);
 
         //----------------------------------------------------------------------
+        /// @brief      In-place version of reconstruct(): writes the reconstruction
+        ///             directly into inputField, without temporary fields
+        ///
+        /// @details    Gives the same result as
+        ///             inputField = reconstruct(inputField, Coeff, Name, correctBC),
+        ///             but the internal field is computed straight into the field storage.
+        ///             reconstruct() copy-constructs the field twice, and each copy also
+        ///             copies all the stored old-time levels. Intended for repeated
+        ///             reconstructions, e.g. inside a nonlinear solver.
+        ///
+        /// @param[in/out]  inputField  The field overwritten with the reconstruction
+        /// @param[in]  Coeff       The coefficients of the POD expansion (one per mode used)
+        /// @param[in]  Name        The name given to inputField (renamed only if different)
+        /// @param[in]  correctBC   Whether correctBoundaryConditions() is called on the reconstructed field or not.
+        ///                         See reconstruct() for details. Ignored for surface fields, as in reconstruct().
+        ///
+        void reconstructInPlace(
+            GeometricField<Type, PatchField, GeoMesh>& inputField,
+            const Eigen::Ref<const Eigen::VectorXd>& Coeff,
+            const word& Name,
+            bool correctBC = true);
+
+        //----------------------------------------------------------------------
         /// @brief      Function to project a list of fields into the modes manifold
         ///
         /// @param[in]  snapshots  The list of snapshots to be projected
