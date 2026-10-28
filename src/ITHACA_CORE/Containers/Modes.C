@@ -255,6 +255,76 @@ Modes<Type, PatchField, GeoMesh>::reconstruct(
 }
 
 template<class Type, template<class> class PatchField, class GeoMesh>
+void Modes<Type, PatchField, GeoMesh>::reconstructInPlace(
+    GeometricField<Type, PatchField, GeoMesh>& inputField,
+    const Eigen::Ref<const Eigen::VectorXd>& Coeff,
+    const word& Name,
+    bool correctBC)
+{
+    if (EigenModes.size() == 0)
+    {
+        toEigen();
+    }
+
+    const label Nmodes = Coeff.rows();
+    M_Assert(Nmodes <= EigenModes[0].cols(),
+             "The number of coefficients is higher than the number of available modes");
+
+    // Same layout as Foam2Eigen::field2Eigen: the components of each element are contiguous.
+    // primitiveFieldRef() also stores the old-time levels, as the assignment in reconstruct() does
+    Field<Type>& internal = inputField.primitiveFieldRef();
+    Eigen::Map<Eigen::VectorXd> InField(
+        reinterpret_cast<scalar*>(internal.data()),
+        internal.size() * pTraits<Type>::nComponents);
+    M_Assert(InField.size() == EigenModes[0].rows(),
+             "The size of the field does not match the size of the modes");
+    InField.noalias() = EigenModes[0].leftCols(Nmodes) * Coeff;
+
+    // As in reconstruct(): the internal field is clipped based on the name before renaming
+    if (inputField.name() == "nut")
+    {
+        InField = (InField.array() < 0).select(0, InField);
+    }
+
+    // Foam2Eigen::Eigen2field does not correct the boundary conditions of surface fields
+    if constexpr (!std::is_same<GeoMesh, surfaceMesh>::value)
+    {
+        if (correctBC)
+        {
+            inputField.correctBoundaryConditions();
+        }
+    }
+
+    // reconstruct() assigns the boundary of the reconstructed copy patch by patch, through the virtual
+    // operator=(const PatchField<Type>&). Some patch types do more than copying there: valuePointPatchField
+    // takes the internal values (extrapolateInternal). Same assignment, patch by patch since the
+    // assignment of the whole boundary to itself is a no-op
+    typename GeometricField<Type, PatchField, GeoMesh>::Boundary& bf = inputField.boundaryFieldRef();
+    forAll(bf, patchi)
+    {
+        PatchField<Type>& patch = bf[patchi];
+        patch = static_cast<const PatchField<Type>&>(patch);
+    }
+
+    if (inputField.name() != Name)
+    {
+        inputField.rename(Name);
+    }
+
+    for (label i = 0; i < NBC; i++)
+    {
+        Eigen::VectorXd BF = EigenModes[i + 1].leftCols(Nmodes) * Coeff;
+
+        if (inputField.name() == "nut")
+        {
+            BF = (BF.array() < 0).select(0, BF);
+        }
+
+        ITHACAutilities::assignBC(inputField, i, BF);
+    }
+}
+
+template<class Type, template<class> class PatchField, class GeoMesh>
 PtrList<GeometricField<Type, PatchField, GeoMesh >>
 Modes<Type, PatchField, GeoMesh>::reconstruct(
     GeometricField<Type, PatchField, GeoMesh>& inputField,
