@@ -25,7 +25,7 @@ stopAt          endTime;
 
 endTime         5;
 
-deltaT          5e-2;     // = deltaT of the reference FOM (OnlineFOM01) and of the V1 trajectory
+deltaT          2.5e-2;     // = deltaT of the reference FOM (OnlineFOM01) and of the V1 trajectory
 
 writeControl    adjustableRunTime;
 
