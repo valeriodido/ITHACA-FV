@@ -45,6 +45,9 @@ SourceFiles
 #include "fvOptions.H"
 #include "wallDist.H"
 #include "Modes.H"
+#include "fixedValueFvPatchFields.H"
+#include "nearWallDist.H"
+#include <vector>
 
 namespace Foam
 {
@@ -62,7 +65,8 @@ namespace ITHACATurbulenceModels
             PtrList<volScalarField> k0Fields,
             PtrList<volScalarField> omega0Fields,
             const dictionary& kOmegaSSTCoeffs,
-            const word& GName = "kOmegaSST:G");
+            const scalar boundFactor = 0.1,
+            const word& GName = "ResidualAssemblerSST:G");
 
         virtual ~ResidualAssemblerSST() = default;
 
@@ -79,6 +83,11 @@ namespace ITHACATurbulenceModels
             const Eigen::VectorXd& stateCoeffs) override;
 
         virtual void boundTurbulenceFields() override;
+
+        virtual List<boolList> clippedCells() const override
+        {
+            return List<boolList>({ kClipped_, omegaClipped_ });
+        }
 
         virtual void computePODCoeffsFromFields(Eigen::Ref<Eigen::VectorXd> stateCoeffs) override;
 
@@ -107,6 +116,68 @@ namespace ITHACATurbulenceModels
         dimensionedScalar a1_, b1_, c1_;
         Switch F3_;
         dimensionedScalar omegaMin_;
+
+        //- Lower bound of k. kMin_ and omegaMin_ are boundFactor times the smallest positive value of the
+        //  initial and training fields: the FOM floor (SMALL) is harmless where k and omega come from a
+        //  solve, but a reconstructed omega can sit at it, and 1/omega terms (CDkOmega, F1) then reach 1e15
+        dimensionedScalar kMin_;
+
+        //- Smooth lower bound of a field: m + m softplus((x - m)/m), identical to x for x >> m.
+        //  clipped marks the cells whose reconstructed value is below fieldMin (diagnostics)
+        static void boundField(volScalarField& field, const dimensionedScalar& fieldMin, boolList& clipped);
+
+        // Dirichlet (fixedValue) patch values, cached from the initial fields.
+        // Mode reconstruction overwrites them, and += / -= are no-ops on fixedValue patches,
+        // so they must be re-imposed after every reconstruction.
+        labelList kDirichletPatches_;
+        List<scalarField> kDirichletValues_;
+        labelList omegaDirichletPatches_;
+        List<scalarField> omegaDirichletValues_;
+
+        static void cacheDirichletValues(
+            const volScalarField& field,
+            labelList& patches,
+            List<scalarField>& values);
+
+        static void imposeDirichletValues(
+            volScalarField& field,
+            const labelList& patches,
+            const List<scalarField>& values);
+
+        // omega wall functions, reimplemented on the ROM fields.
+        // OpenFOAM's omegaWallFunction looks up the turbulenceModel registered on the mesh,
+        // which is the FOM one: it would compute the near-wall omega and G from the FOM k, nut, U.
+        // The omegaWallFunction patches of omega_ are therefore replaced by fixedValue patches
+        // and their behaviour (OpenFOAM v2412 omegaWallFunctionFvPatchScalarField) is reproduced here.
+        struct OmegaWallPatch
+        {
+            label patchi;
+            scalarField cornerWeights;
+            word blending;
+            scalar n;
+            scalar beta1;
+            scalar Cmu;
+            scalar kappa;
+            scalar yPlusLam;
+        };
+
+        std::vector<OmegaWallPatch> omegaWallPatches_;
+
+        //- Unique cells adjacent to omega wall-function patches (rows fixed in the omega equation)
+        labelList omegaWallCells_;
+
+        //- Cells clipped by the last boundTurbulenceFields call (diagnostics)
+        boolList kClipped_;
+        boolList omegaClipped_;
+
+        //- Wall distance of the near-wall cell centres
+        const nearWallDist yWall_;
+
+        //- Replaces the omegaWallFunction patches and stores their coefficients
+        void setupOmegaWallFunctions();
+
+        //- Sets omega and G in the wall-adjacent cells and omega on the wall faces
+        void applyOmegaWallFunctions(volScalarField::Internal& G);
 
         // Blending
         template <class T>

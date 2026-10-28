@@ -52,6 +52,13 @@ namespace ITHACATurbulenceModels
         // Base method to bound turbulence fields to ensure physicality
         virtual void boundTurbulenceFields() = 0;
 
+        // Cells clipped by the last boundTurbulenceFields call, one mask per transported field
+        // in the order of transportedFields(). Used by the solver diagnostics; empty if not tracked
+        virtual List<boolList> clippedCells() const
+        {
+            return List<boolList>();
+        }
+
         // Base method to compute the initial POD coefficients from fields
         virtual void computePODCoeffsFromFields(Eigen::Ref<Eigen::VectorXd> stateCoeffs) = 0;
 

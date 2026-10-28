@@ -17,26 +17,52 @@ FoamFile
 // EigenValue solver, can be eigen or spectra
 EigenSolver eigen;
 
-// BC Treatment, can be lift, Gunzburger or penalty
+// BC Treatment, can be lift, or None in LSPG models
 bcMethod None;
 snapshotCollectionMethod 1;
 
+// Affine reference of the ROM for a new parameter: sum_r w_r q0_r, inverse distance weighting w_r ~ 1/d_r^exponent
+// on the parameters normalised by their training range (as aero-F). With one parameter, exponent 1 and the 2 nearest
+// runs bracketing it, this is linear interpolation: the blended inlet flux then equals the new inlet condition.
+// With all the runs, the blend has a wrong inlet flux, and the pressure equation of the ROM a continuity error.
+parametricDistanceExponent 1;
+maxInterpolatedSolutions   2;    // number of nearest runs used (ties included); 0: all the runs
+
+// Per-run normalisation of the snapshots before the POD: none | run.
+snapshotNormalization run;
+
+// LSPG residual
+fluxResidual        false;       // He et al. 2021 eq. 1.8: residual phi - (phiHbyA - pEqn.flux()) on internal faces
+jacobianStep        1e-5;        // finite-difference step, h_j = jacobianStep * max(|y_j|, 1)
+jacobianOrder       2;           // 1: forward differences (n + 1 residual evaluations, error O(h)); 2: central (2n, error O(h^2))
+writeResidualFields false;       // residual_{U,p,k,omega,phi} at every ROM time step, in the ROM case folder
+residualPreconditioner jacobi;   // none: 1/sqrt(V) rows, t0-calibrated block weights | jacobi: rows / matrix diagonal (preconditioned LSPG)
+// preconditionerScales (1 1 1e-1 5e-1);  // optional (U p k omega) scales of the jacobi blocks; default: RMS of the training snapshots
+turbulenceBoundFactor 0.1;       // k and omega lower bounds: this factor times their smallest positive training value
+
 romID B;
+
+// Stacked POD: the listed fields share one set of coefficients (one POD of the stacked snapshots).
+// Must contain U (phi is always tied to U); their Nmodes*proj must be equal. Omit or () for segregated PODs.
+// The stacked modes are always recomputed and written to ITHACAoutput/PODjoint.
+jointPOD (U p k omega);
+// jointPODWeights (1 1);   // optional multipliers of the field weights, in the order of jointPOD
+//                          // (default: every field gets the same share of the snapshot energy)
 
 // Number of modes to output and to use for projection
 NmodesUout   90;
-NmodesUproj  10;
+NmodesUproj  60;
 
 NmodesPout 90;
-NmodesPproj 5;
+NmodesPproj 60;
 
 turbulenceModel kOmegaSST;
 
 NmodesKout 90;
-NmodesKproj 5;
+NmodesKproj 60;
 
 NmodesOmegaout 90;
-NmodesOmegaproj 5;
+NmodesOmegaproj 60;
 
 NmodesNutout 90;
 NmodesNutproj 5;
@@ -63,3 +89,63 @@ viscDict
 // Output format to save market vectors.
 OutPrecision 20;
 OutType fixed;
+
+// V1 consistency test (Carlberg et al. 2011, Prop. 1): the ROM residual is evaluated on a FOM
+// trajectory written at every time step. The FOM run is cached in ITHACAoutput/V1/<fomLabel>:
+// delete that folder after changing bcValue, the time window or deltaT.
+consistencyTest
+{
+    enabled     true;
+    bcValue     1.0;                                  // inlet velocity of the FOM trajectory
+    suffix      "01";                                 // parametric run with the same boundary condition (ROM_BC_<suffix>);
+                                                      // its ROM residual history is compared with the FOM trajectory
+    startTime   0;
+    endTime     1.0;
+    deltaT      0.005;                                // FOM time step of the in-sample trajectory (= ROM deltaT)
+    statsFrom   0.1;                                  // summary statistics only for t >= statsFrom
+    writePrecision 15;                                // ASCII precision of the trajectory fields (round-off check)
+
+    // Each FOM trajectory is cached in ITHACAoutput/V1/<fomLabel> with its settings (shared by all the ROMs), and the
+    // results go to ITHACAoutput/ROM/<romID>/V1_<fomLabel>. Default label: FOM without pimpleOverride, FOMconverged with it.
+    // Run once without and once with pimpleOverride to compare the two consistency floors.
+    // pimpleOverride: merged into the PIMPLE dictionary of fvSolution for the V1 trajectory only,
+    // so that every time step is converged (the offline snapshots are unaffected)
+    pimpleOverride
+    {
+        nOuterCorrectors        50;
+        nCorrectors             2;
+        nNonOrthogonalCorrectors 2;
+        turbOnFinalIterOnly     false;    // k-omega solved in every outer iteration
+        residualControl
+        {
+            "(U|p|k|omega)"
+            {
+                tolerance       1e-6;     // initial residual of the outer iteration
+                relTol          0;
+            }
+        }
+    }
+}
+
+// Stopping criteria of the LM solve of each time step. The LSPG residual does not vanish at the solution:
+// convergence is stationarity, |J_j^T r| / (|J_j| |r|) <= gradientTol for every reduced coordinate j
+lmSolver
+{
+    maxIterations   10;                  // LM iterations (Jacobian evaluations) per time step
+    gradientTol     1e-6;                // gtol, status CosinusTooSmall
+    reductionTol    1e-6;                // ftol, relative reduction of |r|^2, status RelativeReductionTooSmall
+    stepTol         0;                   // xtol, relative trust-region radius, status RelativeErrorTooSmall; 0 = off
+}
+
+// Solver diagnostics, run when the LM solve of a time step stops with one of the trigger statuses.
+// Written to <ROM folder>/lmDiagnostics/<time>/ (summary.log, singularValues.dat, direction_*.dat,
+// coordinates*.dat), with one line per dump in <ROM folder>/lmDiagnostics/index.dat.
+// Plot with: gnuplot -e "dump='ITHACAoutput/ROM/<romID>/<suffix>/lmDiagnostics/<time>'" lmDiagnostics.gp
+lmDiagnostics
+{
+    enabled         true;
+    triggers        (XtolTooSmall);      // LM statuses that trigger a dump; Running = maximum iterations reached
+    maxDumps        3;                   // dumps per online solve
+    steps           (1e-1 1e-2 1e-3 1e-4 1e-5 1e-6 1e-7 1e-8);  // scan steps, in scaled coordinates
+    coordinateScan  true;                // 2 x (number of coordinates) x (number of steps) residual evaluations
+}

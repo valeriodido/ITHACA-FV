@@ -1,2 +1,2 @@
 TestLSPG.C
-EXE = ./TestLSPG
+EXE = ./TestLSPG.exe

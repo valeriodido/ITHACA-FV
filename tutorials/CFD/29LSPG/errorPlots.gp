@@ -1,64 +1,97 @@
+# Force coefficients and L2 errors of one or more ROMs, for one parametric run
+# Usage:
+#   gnuplot -e "cases='D E G'; run='01'" errorPlots.gp
+#   gnuplot -e "cases='D E'; run='01'; labels='N=15_separate N=15_stacked'" errorPlots.gp
+# Variables:
+#   cases    : ROM identifiers (romID in ITHACAdict), separated by spaces
+#   run      : parametric run (suffix), default 01
+#   labels   : optional legend entries, one per case, '_' is shown as a space (default: "ROM <case>")
+#   fomForces: FOM force coefficients, default ITHACAoutput/OnlineFOM<run>/forceCoeffs.dat
+#   dtWrite  : time between two written fields, for the time axis of the errors (default 0.2)
+# Inputs, written by TestLSPG:
+#   ITHACAoutput/ROM/<case>/<run>/forceCoeffs.dat
+#   ITHACAoutput/ROM/<case>/<run>/errors/L2ErrorLSPG{U,p,k,omega}_mat.txt   ROM vs FOM
+#   ITHACAoutput/ROM/<case>/<run>/errors/L2errorProj{U,p,k,omega}_mat.txt   projection of the FOM on the basis
+# Output: images/lift_and_drag_coefficients_<run>.png, images/l2Errors_<run>.png
+
 reset
 
-set style line 1 lc rgb "#CC0000" lw 2 dt 1   # Crimson line
-set style line 2 lc rgb "#0066CC" lw 2 dt 1   # Vibrant Orange line
-set style line 3 lc rgb "#009966" lw 2 dt 1   # Teal Green line
-set style line 4 lc rgb "#CC0000" lw 2 dt 4   # Crimson line
-set style line 5 lc rgb "#0066CC" lw 2 dt 4   # Vibrant Orange line
-set style line 6 lc rgb "#009966" lw 2 dt 4   # Teal Green line
-set style line 7 lc rgb "#010101" lw 1.5 dt 1
-set style line 8 lc rgb "#FF9900" lw 1.5 dt 1   # Deep Blue line
+if (!exists("cases")) {
+    print "Set the ROMs to plot: gnuplot -e \"cases='D E'; run='01'\" errorPlots.gp"
+    exit
+}
+if (!exists("run")) run = "01"
+if (!exists("dtWrite")) dtWrite = 0.2
+if (!exists("fomForces")) fomForces = "ITHACAoutput/OnlineFOM".run."/forceCoeffs.dat"
 
-# set style line 4 lc rgb "#FF9900" lw 2.5 dt 2   # Deep Blue line
-# set style line 6 lc rgb "#FF00FF" lw 2.5 dt 1
+nCases = words(cases)
+caseName(i) = word(cases, i)
+romFolder(i) = "ITHACAoutput/ROM/".caseName(i)."/".run
+forces(i) = romFolder(i)."/forceCoeffs.dat"
+romError(i, f) = romFolder(i)."/errors/L2ErrorLSPG".f."_mat.txt"
+projError(i, f) = romFolder(i)."/errors/L2errorProj".f."_mat.txt"
+label(i) = exists("labels") ? system("echo '".word(labels, i)."' | tr '_' ' '") : "ROM ".caseName(i)
+fexists(f) = system("test -f '".f."' && echo 1 || echo 0") + 0
+
+haveFOM = fexists(fomForces)
+if (!haveFOM) print "FOM force coefficients not found (".fomForces."): plotting the ROMs only"
+
+# --- Global Style Definitions ---
+colors = "#CC0000 #0066CC #009966 #FF9900 #7733AA #04B5C8 #996633 #E066A0"
+color(i) = word(colors, (i - 1) % words(colors) + 1)
+set style line 7 lc rgb "#010101" lw 1.5 dt 1 pt 7
 
 set border 15 back lw 1.2 lc rgb "#333333"
-
 set tics font "Arial,14" textcolor rgb "#333333"
 set label font "Arial,16" textcolor rgb "#333333"
-set key top right font "Arial,14" box lw 0.8 lc rgb "#CCCCCC" opaque
+system("mkdir -p images")
 
-# L_2 error U - no gif
-set terminal pngcairo size 800,600 font "Arial,14"
-set output "./images/l2Error_U.png"
+# =====================================================================
+# 1. LIFT AND DRAG COEFFICIENTS (2 subplots)
+# forceCoeffs columns: 1 time, 2 Cd, 5 Cl
+# =====================================================================
+set terminal pngcairo size 800,1000 font "Arial,14"
+set output "./images/lift_and_drag_coefficients_".run.".png"
 
+set multiplot layout 2,1 title "Lift and drag coefficients, run ".run font "Arial,14"
+set xlabel "Time [s]" font "Arial,12"
+set key left top font "Arial,12"
+
+do for [col in "5 2"] {
+    c = col + 0
+    set ylabel (c == 5 ? "C_l" : "C_d") font "Arial,12"
+    if (haveFOM) {
+        plot for [i = 1:nCases] forces(i) every ::2 using 1:c with linespoints lw 2 lc rgb color(i) title label(i), \
+             fomForces every ::2 using 1:c with linespoints ls 7 title "FOM"
+    } else {
+        plot for [i = 1:nCases] forces(i) every ::2 using 1:c with linespoints lw 2 lc rgb color(i) title label(i)
+    }
+}
+
+unset multiplot
+unset output
+
+# =====================================================================
+# 2. L2 RELATIVE ERRORS (2x2: U, p, k, omega)
+# Solid: ROM vs FOM. Dashed, same colour: projection error of the FOM on the basis of that ROM
+# =====================================================================
+set terminal pngcairo size 1000,1000 font "Arial,14"
+set output "./images/l2Errors_".run.".png"
+
+set multiplot layout 2,2 title "Relative L_2 errors, run ".run font "Arial,18"
 set xlabel "Time [s]" font "Arial,12" offset 0,-0.5
-set ylabel "Relative error" font "Arial,12" offset -0.5,0
-set title "Relative error of the velocity field" font "Arial,12" offset 0,0.5
+set ylabel "L_2 relative error" font "Arial,12" offset -0.5,0
+set key left top font "Arial,10"
 
-A = "ITHACAoutput/l2error/01A/L2ErrorLSPGU_mat.txt"
-B = "ITHACAoutput/l2error/01B/L2ErrorLSPGU_mat.txt"
+fields = "U p k omega"
+do for [f = 1:4] {
+    fieldName = word(fields, f)
+    set title "L_2 relative error of ".fieldName font "Arial,12" offset 0,0.5
+    plot for [i = 1:nCases] romError(i, fieldName) using ($0 * dtWrite):1 with linespoints lw 2 lc rgb color(i) \
+             title (f == 1 ? label(i) : ""), \
+         for [i = 1:nCases] projError(i, fieldName) using ($0 * dtWrite):1 with lines lw 1.5 dt 2 lc rgb color(i) \
+             title (f == 1 ? "projection, ".label(i) : "")
+}
 
-plot A using 1 with lines ls 1 title "No BC treatment - 8 Modes", \
-     B using 1 with lines ls 3 title "No BC treatment - 10 Modes"
-
-# L2 error p - no gif
-set terminal pngcairo size 800,600 font "Arial,14"
-set output "./images/l2Error_p.png"
-
-set xlabel "Time [s]" font "Arial,12" offset 0,-0.5
-set ylabel "Relative error" font "Arial,12" offset -0.5,0
-set title "Relative error of the pressure field" font "Arial,12" offset 0,0.5
-
-
-A = "ITHACAoutput/l2error/01A/L2ErrorLSPGp_mat.txt"
-B = "ITHACAoutput/l2error/01B/L2ErrorLSPGp_mat.txt"
-
-plot A using 1 with lines ls 1 title "No BC treatment - 8 Modes", \
-     B using 1 with lines ls 3 title "No BC treatment - 10 Modes"
-
-# L2 error nut - no gif
-set terminal pngcairo size 800,600 font "Arial,14"
-set output "./images/l2Error_nut.png"
-
-set xlabel "Time [s]" font "Arial,12" offset 0,-0.5
-set ylabel "Relative error" font "Arial,12" offset -0.5,0
-set title "Relative error of the nut field" font "Arial,12" offset 0,0.5
-
-
-A = "ITHACAoutput/l2error/01A/L2ErrorLSPGnut_mat.txt"
-B = "ITHACAoutput/l2error/01B/L2ErrorLSPGnut_mat.txt"
-
-plot A using 1 with lines ls 1 title "No BC treatment - 8 Modes", \
-    B using 1 with lines ls 3 title "No BC treatment - 10 Modes"
-
+unset multiplot
+unset output

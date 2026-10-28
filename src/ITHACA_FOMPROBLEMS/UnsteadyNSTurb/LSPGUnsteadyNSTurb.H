@@ -92,6 +92,15 @@ public:
     /// from UnsteadyBB, here the eddy viscosity field is also computed and saved.
     void truthSolve(fileName folder = "./ITHACAOutput/Offline");
 
+    //--------------------------------------------------------------------------
+    /// @brief   Called by truthSolve(folder) at the end of every time step, after the PIMPLE loop.
+    /// Does nothing by default; derived classes can evaluate diagnostics on the converged state
+    virtual void timeStepCompleted() { }
+
+    /// @brief   Pressure reference (cell, value) used by the FOM pressure equation
+    label pressureRefCell() const { return pRefCell; }
+    scalar pressureRefValue() const { return pRefValue; }
+
     /// @brief      A method to compute the two matrices needed for the RBF interpolation by combining
     /// the velocity L2 projection coefficients and their time derivatives [a, a_dot]. The time derivatives
     /// are computed using a finite difference scheme according to the list of time instants provided snapshotTimes.
@@ -131,6 +140,14 @@ public:
     /// @brief      Assembles the POD modes
     ///
     void computePOD();
+
+    //- Fields whose modes share one set of coefficients (stacked POD), jointPOD in ITHACAdict, e.g. (U p).
+    //  Empty: every field has its own POD (segregated). phi is always tied to U
+    wordList jointPOD;
+
+    //- Weights of (U p k omega) in the inner product of the stacked POD, 0 for the fields outside jointPOD.
+    //  The ROM projects onto the stacked modes with the same weights
+    Eigen::VectorXd jointPODWeights;
 
     //--------------------------------------------------------------------------
     /// @brief      Complete set up of the lift approach
@@ -178,11 +195,30 @@ private:
     //--------------------------------------------------------------------------
     /// @brief      Computes the phi modes with the same linear combination of the velocity modes
     ///
+    //- RMS of the snapshot L2 norms of each run, used by the per-run normalisation
+    template <class FieldType>
+    List<scalar> runScales(const PtrList<FieldType>& snapshots, const word& fieldName) const;
+
+    //- Copy of the snapshots with each run divided by its scale (plain copy if scales is empty)
+    template <class FieldType>
+    PtrList<FieldType> scaledByRun(const PtrList<FieldType>& snapshots, const List<scalar>& scales) const;
+
     void getPhiModes(
         volVectorModes& Umodes,
         PtrList<volVectorField>& Uomfield,
         surfaceScalarModes& Phimodes,
         PtrList<surfaceScalarField>& Phiomfield);
+
+    //- Stacked POD of the jointPOD fields: one eigenproblem and the modes of every field of the group, phi included, built with the same temporal coefficients.
+    //- This is the usual approach for LSPG (Farhat, Carlberg, He, etc.)
+    //  Sets jointPODWeights; the modes are written to ITHACAoutput/PODjoint
+    void computeJointPOD(
+        PtrList<volVectorField>& Upod,
+        PtrList<surfaceScalarField>& Phipod,
+        PtrList<volScalarField>& Ppod,
+        PtrList<volScalarField>& kpod,
+        PtrList<volScalarField>& omegapod,
+        const label nModes);
 
 private:
     //- Number of velocity modes
@@ -215,6 +251,10 @@ private:
 
     /// Snapshot collection procedure. If 1, the parameter-mean is subtracted from the snapshots.
     label snapshotCollectionMethod;
+    
+    //- "run": each run's snapshots are divided by the RMS of their L2 norms before the POD,
+    //  so that runs with larger magnitudes do not dominate the modes. "none": no normalisation
+    word snapshotNormalization;
 
     /// adjustTimeStep
     bool adjustTimeStep;

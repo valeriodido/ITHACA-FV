@@ -51,6 +51,7 @@ SourceFiles
 #include "BoundaryConditions.H"
 #include "RBFTurbulence.H"
 #include "LevenbergMarquardt.H"
+#include "PressureResidualCheck.H" // Used for residual diagnostics in the FOM evaluation of the ROM residual
 #include <Eigen/Dense>
 #include <memory>
 
@@ -67,10 +68,30 @@ struct NumberOfModes {
     int omega;
 };
 
-struct GaussNewtonSettings {
-    int maxIter = 5;
-    float tol = 1e-2;
-    float stagnationTol = 1e-8;
+/// Stopping criteria of the LM solve of each time step (ITHACAdict, lmSolver). The LSPG residual does not
+/// vanish at the solution, so convergence is stationarity, not a small residual norm
+struct LMSolverSettings {
+    //- Maximum LM iterations (Jacobian evaluations) per time step
+    label maxIterations = 10;
+    //- gtol: largest cosine between the residual and a Jacobian column, |J_j^T r| / (|J_j| |r|)
+    scalar gradientTol = 1e-4;
+    //- ftol: relative reduction of |r|^2, actual and predicted
+    scalar reductionTol = 1e-6;
+    //- xtol: trust-region radius relative to |y| (scaled by the Jacobian column norms); 0 disables it
+    scalar stepTol = 0;
+};
+
+/// Settings of the solver diagnostics run when the LM solve of a time step fails (ITHACAdict, lmDiagnostics)
+struct LMDiagnosticsSettings {
+    bool enabled = false;
+    //- LM statuses that trigger a diagnostic dump ("Running" = maximum iterations reached)
+    wordList triggers;
+    //- Maximum number of dumps per online solve
+    label maxDumps = 3;
+    //- Steps of the scans, in scaled coordinates y
+    scalarList steps;
+    //- Scan every reduced coordinate (2 residual evaluations per coordinate and step)
+    bool coordinateScan = true;
 };
 
 
@@ -93,6 +114,37 @@ public:
     //- Given the boundary conditions and a timeManager, solves the reduced problem
     void solveOnline(const word& bcROM, const word& folder = "ITHACAoutput/OnlineLSPGROM/");
 
+    /// @brief Consistency diagnostic (Carlberg et al. 2011): evaluates the ROM residual
+    /// on a sequence of consecutive FOM states, all separated by deltaT.
+    /// @param mode "exact"     : FOM fields, nut recomputed from (U, k, omega) as in the ROM residual
+    ///             "projected" : FOM fields projected onto the ROM affine space
+    /// @return [nSteps-2 x 7] matrix: time, total, U, p, k, omega, phi norms, weighted as minimised by LM
+    /// (phi is 0 without fluxResidual).
+    /// The first two steps are skipped, since they lack a valid old-old time level.
+    /// @param pressureCheckFile "exact" mode only, if not empty: writes the pressure residual split into
+    /// terms and regions (PressureResidualCheck.H), plus nut and old-time level checks against nutFom,
+    /// phiFom and Ufom (nutFom may be null)
+    Eigen::MatrixXd evaluateResidualOnTrajectory(
+        const word& bcROM,
+        const PtrList<volVectorField>& Ufom,
+        const PtrList<surfaceScalarField>& phiFom,
+        const PtrList<volScalarField>& pFom,
+        const PtrList<volScalarField>& kFom,
+        const PtrList<volScalarField>& omegaFom,
+        const Eigen::VectorXd& times,
+        const scalar deltaT,
+        const word& mode,
+        const fileName& pressureCheckFile = fileName(),
+        const PtrList<volScalarField>* nutFom = nullptr);
+
+    /// @brief Block weights (U, p, k, omega, phi) currently applied to the residual (phi is 0 without fluxResidual)
+    Eigen::VectorXd residualBlockWeights() const;
+
+    /// @brief Weights of the offline runs at the given parameters.
+    /// Settings in ITHACAdict: parametricDistanceExponent (default 1) and maxInterpolatedSolutions
+    /// (only the nearest runs, ties included; default 0 = all).
+    Eigen::VectorXd interpolateIDW(const Eigen::VectorXd& input_parameters) const;
+
 private:
     /// @brief Captures the relevant FOM data and stores it internally
     /// ideally the FOM could then be destroyed and the ROM would still work. This is still wip
@@ -103,8 +155,36 @@ private:
         const bool correctBCs = true,
         const bool writeResidual = false) override;
 
+    //- Terms of the pressure residual at the current fields, assembled as in residualWithCurrentFields
+    PressureResidualCheck::Terms pressureResidualTerms();
+
     //- Assembles the residual vector using the current fields in memory
-    Eigen::VectorXd residualWithCurrentFields();
+    Eigen::VectorXd residualWithCurrentFields(const bool writeResidual = false);
+
+    //- Norm of the face-flux block, 0 if fluxResidual is off
+    double phiBlockNorm() const;
+
+    //- Row weights of the Jacobi preconditioner from the diagonals of the assembled equations
+    //- Check against Linsday (Carlberg) paper
+    void setJacobiPreconditioner(
+        const fvVectorMatrix& UEqn,
+        const fvScalarMatrix& pEqn,
+        const PtrList<fvScalarMatrix>& turbEqs);
+
+    // *** Solver diagnostics (LMDiagnostics.C) *** //
+
+    //- Whether the LM status of a time step triggers a diagnostic dump
+    bool lmDiagnosticsTriggered(const std::string& status) const;
+
+    //- Diagnoses the reduced problem at the point y where LM stopped. Writes in folder/lmDiagnostics/<time>/:
+    //  the singular values of the Jacobian, residual scans along the Gauss-Newton and steepest-descent
+    //  directions and along every reduced coordinate (kinks, jumps), the counts of k/omega cells crossing
+    //  the clipping bound and of faces where phi changes sign, and a summary with a heuristic interpretation
+    void runLMDiagnostics(
+        const LevenbergMarquardtFunctor& functor,
+        const Eigen::VectorXd& y,
+        const std::string& status,
+        const word& folder);
 
     //- Reconstructs the reduced solution fields from the currentState_ vector
     void reconstructReducedFields(
@@ -122,15 +202,26 @@ private:
 
     void createTurbulenceModel();
 
-    //- Inverse Distance Weighting interpolation of the input parameters to get the current state vector
-    Eigen::VectorXd interpolateIDW(const Eigen::VectorXd& input_parameters);
-
-    ///- Reads eigenvalues and fills the eigenvalues_ vector
-    void readEigenvalues();
 
     ///- Method to initializa the POD coefficients by reconstructing fields at a selected time
     /// The method reads the fields from disk and projects them onto the modes to get the initial coefficients
     void initializePODCoeffsFromFields();
+
+    //- Resets the time to the start time and the reduced fields (U_r, p_r, k_r, omega_r, nut_r, phi_r) to the
+    //  initial condition on disk, without old time levels, as after construction.
+    void resetToInitialCondition();
+
+    //- Builds stateMap_: the reduced coordinates are [shared coefficients of the stacked POD fields;
+    //  coefficients of the other fields in the order U p k omega]. Empty map without a stacked POD
+    void buildStateMap();
+
+    //- Reduced coordinates of a full state, the inverse of stateMap_ on its range
+    Eigen::VectorXd reducedCoordinates(const Eigen::VectorXd& state) const;
+
+    //- Coefficients of the stacked POD: projection of the snapshots (columns, Foam2Eigen layout, in the
+    //  order U p k omega; the fields outside the stacked POD are not used) in the weighted inner product
+    //  sum_f w_f <., .>_V the modes were computed with
+    Eigen::MatrixXd jointCoefficients(const List<Eigen::MatrixXd>& snapshots);
 
 private:
     //- Parameters for the offline solution
@@ -244,8 +335,24 @@ private:
     ///- Reference value for pressure
     scalar _pRefValue;
 
-    ///- Modes eigenvalues, to be used for normalization of the modes coefficients
-    Eigen::VectorXd eigenvalues_;
+    ///- RMS of the training values of each reduced coordinate, used as state scaling
+    Eigen::VectorXd coefficientScale_;
+
+    ///- Reduced coordinates solved for by LM (unscaled), currentState_ = stateMap_ * currentCoords_
+    Eigen::VectorXd currentCoords_;
+
+    ///- Fields (U p k omega) of the stacked POD, which share one set of coefficients
+    boolList jointField_ = boolList(4, false);
+
+    ///- Weights of (U p k omega) in the inner product of the stacked POD
+    Eigen::VectorXd jointWeights_;
+
+    ///- Field scales (U, p, k, omega) of the Jacobi-preconditioned residual: RMS of the training snapshots
+    ///  (the fields the POD was computed on), or preconditionerScales in ITHACAdict
+    Eigen::VectorXd fieldScale_;
+
+    ///- Recompute the Jacobi preconditioner at the next residual evaluation (set once per time step)
+    bool updatePreconditioner_ = true;
 
     ///- Workspace for the residual
     BlockResidual residualWorkspace_;
@@ -261,6 +368,21 @@ private:
 
     ///- Block index for omega
     label iOmega_;
+
+    ///- Block index for the face flux, -1 if fluxResidual is off
+    label iPhi_ = -1;
+
+    ///- Inverse distance weighting of the affine reference: exponent of the distance, and number of nearest
+    ///  runs used (0: all)
+    scalar idwExponent_ = 1.0;
+    label idwNeighbours_ = 0;
+
+    ///- Stopping criteria of the LM solve
+    LMSolverSettings lmSettings_;
+
+    ///- Solver diagnostics settings, and dumps written so far in the current online solve
+    LMDiagnosticsSettings lmDiagnostics_;
+    label nDiagnosticDumps_ = 0;
 };
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
