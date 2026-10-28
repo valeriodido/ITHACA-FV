@@ -231,16 +231,13 @@ namespace ITHACATurbulenceModels
     }
 
     void ResidualAssemblerSST::reconstructTurbulenceFields(
-        const Eigen::VectorXd& stateCoeffs)
+        const Eigen::Ref<const Eigen::VectorXd>& stateCoeffs)
     {
         const label nKModes = kModes_.size();
         const label nOmegaModes = omegaModes_.size();
 
-        const Eigen::VectorXd kCoeffs = stateCoeffs.head(nKModes);
-        const Eigen::VectorXd omegaCoeffs = stateCoeffs.segment(nKModes, nOmegaModes);
-
-        k_ = kModes_.reconstruct(k_, kCoeffs, "k_r");
-        omega_ = omegaModes_.reconstruct(omega_, omegaCoeffs, "omega_r");
+        kModes_.reconstructInPlace(k_, stateCoeffs.head(nKModes), "k_r");
+        omegaModes_.reconstructInPlace(omega_, stateCoeffs.segment(nKModes, nOmegaModes), "omega_r");
 
         imposeDirichletValues(k_, kDirichletPatches_, kDirichletValues_);
         imposeDirichletValues(omega_, omegaDirichletPatches_, omegaDirichletValues_);

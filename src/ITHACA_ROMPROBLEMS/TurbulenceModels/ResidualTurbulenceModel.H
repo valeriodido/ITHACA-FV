@@ -47,7 +47,7 @@ namespace ITHACATurbulenceModels
         tmp<fvVectorMatrix> divDevReff() const;
 
         // Base method to reconstruct from POD
-        virtual void reconstructTurbulenceFields(const Eigen::VectorXd& stateCoeffs) = 0;
+        virtual void reconstructTurbulenceFields(const Eigen::Ref<const Eigen::VectorXd>& stateCoeffs) = 0;
 
         // Base method to bound turbulence fields to ensure physicality
         virtual void boundTurbulenceFields() = 0;

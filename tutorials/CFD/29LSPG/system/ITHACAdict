@@ -51,18 +51,18 @@ jointPOD (U p k omega);
 
 // Number of modes to output and to use for projection
 NmodesUout   90;
-NmodesUproj  60;
+NmodesUproj  30;
 
 NmodesPout 90;
-NmodesPproj 60;
+NmodesPproj 30;
 
 turbulenceModel kOmegaSST;
 
 NmodesKout 90;
-NmodesKproj 60;
+NmodesKproj 30;
 
 NmodesOmegaout 90;
-NmodesOmegaproj 60;
+NmodesOmegaproj 30;
 
 NmodesNutout 90;
 NmodesNutproj 5;
