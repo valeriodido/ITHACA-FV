@@ -76,9 +76,44 @@ struct LevenbergMarquardtFunctor
 
   int operator()(const Eigen::VectorXd& y, Eigen::VectorXd& fvec) const
   {
-    const Eigen::VectorXd x = reducedProblem_->getStateScaling().cwiseProduct(y);
-    fvec = reducedProblem_->assembleResidual(x);
+    fvec = reducedProblem_->assembleResidual(reducedProblem_->fullState(y));
     return 0;
+  }
+
+  /// @brief Finite-difference Jacobian in the scaled coordinates y, forward (jacobianOrder 1, error O(h))
+  /// or central (jacobianOrder 2, error O(h^2), twice the residual evaluations).
+  /// The step is h_j = jacobianStep * max(|y_j|, 1). The scaled coordinates are O(1) by construction,
+  /// so the floor keeps h away from zero for coefficients close to zero. Eigen's NumericalDiff uses
+  /// h_j ~ |y_j| instead, which gives noise-dominated columns when y_j -> 0.
+  /// @return The number of residual evaluations (counted by Eigen as function evaluations)
+  int df(const Eigen::VectorXd& y, Eigen::MatrixXd& fjac) const
+  {
+    const double hRel = reducedProblem_->jacobianStep();
+    const bool central = reducedProblem_->jacobianOrder() == 2;
+    Eigen::VectorXd yPert = y;
+    Eigen::VectorXd fPlus(n_values), fMinus(n_values);
+
+    // Forward differences share the unperturbed residual. The functor does not see the fvec LM holds,
+    // so it is evaluated once here
+    if (!central)
+    {
+      operator()(y, fMinus);
+    }
+
+    for (int j = 0; j < n_inputs; ++j)
+    {
+      const double h = hRel * std::max(std::abs(y(j)), 1.0);
+      yPert(j) = y(j) + h;
+      operator()(yPert, fPlus);
+      if (central)
+      {
+        yPert(j) = y(j) - h;
+        operator()(yPert, fMinus);
+      }
+      yPert(j) = y(j);
+      fjac.col(j) = central ? Eigen::VectorXd((fPlus - fMinus) / (2.0 * h)) : Eigen::VectorXd((fPlus - fMinus) / h);
+    }
+    return central ? 2 * n_inputs : n_inputs + 1;
   }
 };
 
