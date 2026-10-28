@@ -86,11 +86,8 @@ _p = autoPtr<volScalarField>(
             runTime.timeName(),
             mesh,
             IOobject::MUST_READ,
-            IOobject::AUTO_WRITE
-          ),
-        mesh
-      )
-    );
+            IOobject::AUTO_WRITE),
+        mesh));
 volScalarField& p = _p();
 
 _laminarTransport = autoPtr<singlePhaseTransportModel>(
@@ -100,3 +97,23 @@ singlePhaseTransportModel& laminarTransport = _laminarTransport();
 _pRefCell = 0;
 _pRefValue = 0.0;
 setRefCell(p, pimple.dict(), _pRefCell, _pRefValue);
+
+_k = autoPtr<volScalarField>(
+    new volScalarField(
+        IOobject(
+            "k_r",
+            runTime.timeName(),
+            mesh,
+            IOobject::MUST_READ,
+            IOobject::AUTO_WRITE),
+        mesh));
+
+_omega = autoPtr<volScalarField>(
+    new volScalarField(
+        IOobject(
+            "omega_r",
+            runTime.timeName(),
+            mesh,
+            IOobject::MUST_READ,
+            IOobject::AUTO_WRITE),
+        mesh));

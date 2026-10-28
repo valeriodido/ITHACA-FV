@@ -46,71 +46,54 @@ ReducedLSPG::ReducedLSPG(std::shared_ptr<ITHACAcontext> context): context_(std::
             runTime().system(),
             mesh(),
             IOobject::MUST_READ,
-            IOobject::NO_WRITE
-        )
-    );
-    romSettings_ = ROMSettings
-    {
+            IOobject::NO_WRITE));
+    romSettings_ = ROMSettings {
         ITHACAdict->lookupOrDefault<word>("bcMethod", "lift"),
         ITHACAdict->lookupOrDefault<word>("romID", ""),
         ITHACAdict->lookupOrDefault<label>("snapshotCollectionMethod", 1),
         ITHACAdict->lookupOrDefault<bool>("scaleResidualWithCellVolume", true),
-        ITHACAdict->lookupOrDefault<bool>("debug", false)
+        ITHACAdict->lookupOrDefault<bool>("debug", false),
+        ITHACAdict->lookupOrDefault<bool>("fluxResidual", true),
+        ITHACAdict->lookupOrDefault<bool>("writeResidualFields", false),
+        ITHACAdict->lookupOrDefault<scalar>("jacobianStep", 1e-5),
+        ITHACAdict->lookupOrDefault<label>("jacobianOrder", 2),
+        ITHACAdict->lookupOrDefault<word>("residualPreconditioner", "none")
     };
+    M_Assert(romSettings_.jacobianOrder == 1 || romSettings_.jacobianOrder == 2,
+        "jacobianOrder must be 1 (forward) or 2 (central) in ITHACAdict.");
+    M_Assert(romSettings_.residualPreconditioner == "none" || romSettings_.residualPreconditioner == "jacobi",
+        "Invalid residualPreconditioner in ITHACAdict. Valid options are 'none' or 'jacobi'.");
 
     M_Assert(romSettings_.bcMethod == "lift" || romSettings_.bcMethod == "None", "Invalid bcMethod specified in ITHACAdict. Valid options are 'lift' or 'none'.");
+    M_Assert(romSettings_.jacobianStep > 0, "jacobianStep must be > 0.");
     M_Assert(romSettings_.bcMethod == "None" || romSettings_.snapshotCollectionMethod == 0, "If using bcMethod 'lift', snapshotCollectionMethod must be set to 0 in ITHACAdict.");
     nCells = mesh().nCells();
 }
 
-void ReducedLSPG::assembleJacobian(const Eigen::VectorXd& state,
-    const Eigen::VectorXd& residual,
-    Eigen::MatrixXd& jacobian,
-    const Time& runTime)
-{
-    const double eps = 1e-6;
-    const double absoluteFloor_ = 1e-8;
-
-    for (int i = 0; i < state.size(); i++)
-    {
-        const double h = std::sqrt(eps) * std::max({ std::abs(state[i]), absoluteFloor_ });
-        Eigen::VectorXd state_plus = state;
-        state_plus[i] += h;
-        const Eigen::VectorXd residual_plus = assembleResidual(state_plus);
-        jacobian.col(i) = (residual_plus - residual) / h;
-    }
-    return;
-}
-
-template<class Type>
+template <class Type>
 void ReducedLSPG::writeResidualField(
-  const word& name,
-  const fvMatrix<Type>& eqn,
-  const Field<Type>& R,
-  const fvMesh& mesh,
-  const bool perUnitVolume
-)
+    const word& name,
+    const fvMatrix<Type>& eqn,
+    const Field<Type>& R,
+    const fvMesh& mesh,
+    const bool perUnitVolume)
 {
     typedef GeometricField<Type, fvPatchField, volMesh> fieldType;
 
     // fvMatrix residuals are integrated over the cell volume
     const dimensionSet dims =
-        perUnitVolume ? eqn.dimensions()/dimVolume : eqn.dimensions();
+        perUnitVolume ? eqn.dimensions() / dimVolume : eqn.dimensions();
 
-    fieldType res
-    (
-        IOobject
-        (
+    fieldType res(
+        IOobject(
             name,
             mesh.time().timeName(),
             mesh,
             IOobject::NO_READ,
-            IOobject::NO_WRITE
-        ),
+            IOobject::NO_WRITE),
         mesh,
         dimensioned<Type>("zero", dims, Zero),
-        zeroGradientFvPatchField<Type>::typeName
-    );
+        zeroGradientFvPatchField<Type>::typeName);
 
     res.primitiveFieldRef() = R;
     if (perUnitVolume)
@@ -119,7 +102,7 @@ void ReducedLSPG::writeResidualField(
     }
     res.correctBoundaryConditions();
 
-    res.write();
+    exportResidual(res);
 }
 // Template instantiation for the types we expect to use
 template void ReducedLSPG::writeResidualField<scalar>(
@@ -127,15 +110,13 @@ template void ReducedLSPG::writeResidualField<scalar>(
     const fvMatrix<scalar>& eqn,
     const Field<scalar>& R,
     const fvMesh& mesh,
-    const bool perUnitVolume
-);
+    const bool perUnitVolume);
 template void ReducedLSPG::writeResidualField<vector>(
     const word& name,
     const fvMatrix<vector>& eqn,
     const Field<vector>& R,
     const fvMesh& mesh,
-    const bool perUnitVolume
-);
+    const bool perUnitVolume);
 
 
 argList& ReducedLSPG::args() const

@@ -17,6 +17,7 @@ ReducedFsi/ReducedFsi.C
 ReducedCompressibleSteadyNS/ReducedCompressibleSteadyNS.C
 ReducedLSPGUnsteadyBBTurb/ReducedLSPGUnsteadyBBTurb.C
 ReducedLSPGUnsteadyNSTurb/ReducedLSPGUnsteadyNSTurb.C
+ReducedLSPGUnsteadyNSTurb/LMDiagnostics.C
 ReducedLSPG/ReducedLSPG.C
 ReducedLSPG/BlockResidual.C
 NonLinearSolvers/LevenbergMarquardt.C

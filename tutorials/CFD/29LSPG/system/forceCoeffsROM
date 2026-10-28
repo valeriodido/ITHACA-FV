@@ -1,0 +1,48 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  v2412                                 |
+|   \\  /    A nd           | Web:      www.openfoam.com                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      forceCoeffsROM;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// forceCoeffs settings of the ROM runs of TestLSPG (one function object per run, created by TestLSPG):
+// the coefficients of ROM <caseID>, run <suffix> are written to ITHACAoutput/ROM/<caseID>/<suffix>/forceCoeffs.dat.
+// Keep the settings equal to liftAndDragFOM in system/controlDict, so that ROM and FOM coefficients are comparable.
+// Note: the viscous force uses nuEff of the turbulence model registered in the case, which is the FOM one.
+
+type            forceCoeffs;
+libs            (forces);
+
+patches         (cylinder1);
+
+p               p_r;
+U               U_r;
+
+rho             rhoInf;
+rhoInf          1;
+
+CofR            (0 0 0);
+pitchAxis       (0 1 0);
+
+dragDir         (1 0 0);
+liftDir         (0 1 0);
+
+magUInf         1;
+lRef            1;
+Aref            1;
+
+log             false;
+writeControl    adjustableRunTime;
+writeInterval   0.1;
+
+// ************************************************************************* //

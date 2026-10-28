@@ -42,6 +42,7 @@ SourceFiles
 #include "fvOptions.H"
 #include "ITHACAcontext.H"
 #include "BlockResidual.H"
+#include "ITHACAstream.H"
 #include <Eigen/Dense>
 #include <memory>
 
@@ -53,6 +54,20 @@ struct ROMSettings {
     bool scaleResidualWithCellVolume = true;
     //- Debug flag
     bool debug_ = false;
+    //- Adds the face-flux residual phi - (phiHbyA - pEqn.flux()) on the internal faces
+    //  (He et al. 2021, eq. 1.8), which ties the reconstructed flux to the Rhie-Chow flux of (U, p)
+    bool fluxResidual = true;
+    //- Writes the residual fields at every time step of solveOnline, in the ROM case folder
+    bool writeResidualFields = false;
+    //- Relative finite-difference step for the Jacobian, h_j = jacobianStep * max(|y_j|, 1)
+    scalar jacobianStep = 1e-5;
+    //- Order of the finite-difference Jacobian: 1 forward (n + 1 residual evaluations), 2 central (2n)
+    label jacobianOrder = 2;
+    //- Residual preconditioning (Lindsay, Fike, Tezaur, Carlberg 2022, preconditioned LSPG):
+    //  "none"   : volume-integrated residuals weighted by 1/sqrt(V), block weights calibrated at t0
+    //  "jacobi" : each row divided by its matrix diagonal (frozen within a time step), i.e. an approximate
+    //             local increment of the unknown, weighted by sqrt(V) and divided by a field scale
+    word residualPreconditioner = "none";
 };
 
 /*
@@ -77,15 +92,9 @@ public:
 
     /// @brief Virtual function to be overridden to assemble the residual
     virtual Eigen::VectorXd assembleResidual(
-      const Eigen::VectorXd& state,
-      const bool correctBCs = true,
-      const bool writeResidual = false) = 0;
-
-    /// @brief Manual assembly of the jacobian
-    void assembleJacobian(const Eigen::VectorXd& state,
-    const Eigen::VectorXd& residual,
-    Eigen::MatrixXd& jacobian,
-    const Time& runTime);
+        const Eigen::VectorXd& state,
+        const bool correctBCs = true,
+        const bool writeResidual = false) = 0;
 
     /// @brief Initializes the POD coefficients from the current fields in memory
     virtual void initializePODCoeffsFromFields() = 0;
@@ -94,6 +103,26 @@ public:
     const Eigen::VectorXd& getStateScaling() const
     {
         return stateScaling_;
+    }
+
+    /// @brief Full state x = E (s .* y) from the scaled reduced coordinates y, with E = stateMap_
+    /// (identity if stateMap_ is empty)
+    Eigen::VectorXd fullState(const Eigen::VectorXd& y) const
+    {
+        const Eigen::VectorXd x = stateScaling_.cwiseProduct(y);
+        return stateMap_.size() ? Eigen::VectorXd(stateMap_ * x) : x;
+    }
+
+    /// @brief Returns the relative finite-difference step for the Jacobian
+    double jacobianStep() const
+    {
+        return romSettings_.jacobianStep;
+    }
+
+    /// @brief Returns the order of the finite-difference Jacobian (1 forward, 2 central)
+    label jacobianOrder() const
+    {
+        return romSettings_.jacobianOrder;
     }
 
     /// @brief Returns the ID of the ROM
@@ -110,6 +139,22 @@ protected:
         const Field<Type>& R,
         const fvMesh& mesh,
         const bool perUnitVolume = true);
+
+    /// @brief Writes a residual field: in residualOutputFolder_/<time> if set, else in the case time directory
+    template <class FieldType>
+    void exportResidual(FieldType& res) const
+    {
+        if (residualOutputFolder_.empty())
+        {
+            res.write();
+        } else
+        {
+            ITHACAstream::exportSolution(res, name(res.time().value()), residualOutputFolder_);
+        }
+    }
+
+    /// @brief Output folder of the residual fields (empty: case time directory)
+    word residualOutputFolder_;
 
 protected:
     /// @brief Shared pointer to the ITHACAcontext object
@@ -148,8 +193,12 @@ protected:
     /// Current state vector
     Eigen::VectorXd currentState_;
 
-    /// State scaling vector (could be for example the POD singular values)
+    /// State scaling vector (could be for example the POD singular values), one entry per reduced coordinate
     Eigen::VectorXd stateScaling_;
+
+    /// Maps the reduced coordinates onto the full state, e.g. a coefficient shared by the fields of a
+    /// stacked POD is copied into the slot of every field. Empty: the reduced coordinates are the state
+    Eigen::MatrixXd stateMap_;
 
     // *** Time step management - These are called by openfoam Time object *** //
     //- Whether to adjust the time step based on the Courant number (or custom criteria?)
@@ -163,8 +212,7 @@ protected:
 
     //- Number of cell elements
     label nCells;
-
-  };
+};
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 

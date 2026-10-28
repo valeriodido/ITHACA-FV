@@ -75,6 +75,9 @@ void LSPGUnsteadyNSTurb::readITHACAdict()
 {
     bcMethod = ITHACAdict->lookupOrDefault<word>("bcMethod", "None");
     snapshotCollectionMethod = ITHACAdict->lookupOrDefault<label>("snapshotCollectionMethod", 0);
+    snapshotNormalization = ITHACAdict->lookupOrDefault<word>("snapshotNormalization", "none");
+    M_Assert(snapshotNormalization == "none" || snapshotNormalization == "run",
+        "snapshotNormalization must be 'none' or 'run' in ITHACAdict.");
     turbulenceModel = ITHACAdict->lookupOrDefault<word>("turbulenceModel", "kOmegaSST");
 
     M_Assert(bcMethod == "lift" || bcMethod == "None", "The BC method must be set to 'lift' or 'None' in ITHACAdict. Other methods are not implemented yet.");
@@ -89,7 +92,25 @@ void LSPGUnsteadyNSTurb::readITHACAdict()
     NkModes_ = ITHACAdict->lookupOrDefault<label>("NmodesKproj", 5);
     NomegaModes_ = ITHACAdict->lookupOrDefault<label>("NmodesOmegaproj", 5);
 
+    jointPOD = ITHACAdict->lookupOrDefault<wordList>("jointPOD", wordList());
+    jointPODWeights = Eigen::VectorXd::Zero(4);
+    if (jointPOD.size())
+    {
+        const wordList fieldNames({ "U", "p", "k", "omega" });
+        const labelList fieldModes({ NUmodes_, NPmodes_, NkModes_, NomegaModes_ });
+        M_Assert(jointPOD.size() >= 2 && jointPOD.found("U"),
+            "jointPOD must contain U and at least one more field.");
+        for (const word& f : jointPOD)
+        {
+            const label idx = fieldNames.find(f);
+            M_Assert(idx >= 0, "jointPOD entries must be U, p, k or omega.");
+            M_Assert(fieldModes[idx] == NUmodes_,
+                "The fields in jointPOD share their coefficients: their Nmodes*proj must equal NmodesUproj.");
+        }
+    }
+
     Info << "### INFO ### " << nl
+         << "Stacked POD fields: " << jointPOD << nl
          << "BC method: " << bcMethod << nl
          << "Number of velocity modes for projection: " << NUmodes_ << nl
          << "Number of pressure modes for projection: " << NPmodes_ << nl
@@ -237,6 +258,8 @@ void LSPGUnsteadyNSTurb::truthSolve(fileName folder)
             }
         }
 
+        timeStepCompleted();
+
         Info << "ExecutionTime = " << runTime.elapsedCpuTime() << " s"
              << "  ClockTime = " << runTime.elapsedClockTime() << " s"
              << nl << endl;
@@ -248,6 +271,7 @@ void LSPGUnsteadyNSTurb::truthSolve(fileName folder)
             omega = turbulence->omega();
             ITHACAstream::exportSolution(U, name(counter), folder);
             ITHACAstream::exportSolution(p, name(counter), folder);
+            ITHACAstream::exportSolution(phi, name(counter), folder);
             ITHACAstream::exportSolution(nut, name(counter), folder);
             ITHACAstream::exportSolution(k, name(counter), folder);
             ITHACAstream::exportSolution(omega, name(counter), folder);
@@ -453,6 +477,23 @@ void LSPGUnsteadyNSTurb::prepareModes()
 
 // * * * * * * * * * * * * * * Restart Methods * * * * * * * * * * * * * //
 
+namespace
+{
+/// Assigns the field stored on disk at the current time to field, boundary values included,
+/// and removes the old-time levels of field.
+// Is used to reset the fields after a simulation has been run
+template <class FieldType>
+void resetFieldFromDisk(FieldType& field, const word& name, const fvMesh& mesh)
+{
+    const FieldType fieldOnDisk(
+        IOobject(name, mesh.time().timeName(), mesh,
+            IOobject::MUST_READ, IOobject::NO_WRITE, IOobject::NO_REGISTER),
+        mesh);
+    field == fieldOnDisk;
+    field.clearOldTimes();
+}
+}
+
 void LSPGUnsteadyNSTurb::restart()
 {
     Info << "### Restarting the offline infrastructure." << endl;
@@ -471,20 +512,32 @@ void LSPGUnsteadyNSTurb::restart()
             IOobject::MUST_READ_IF_MODIFIED,
             IOobject::NO_WRITE));
 
-    // Now we reset the fields, reading from disk (OpenFOAM folders)
-    volVectorField U_new(IOobject("U", runTime.timeName(), mesh,
-                             IOobject::MUST_READ, IOobject::NO_WRITE),
-        mesh);
-    _U() = U_new;
-    volScalarField nut_new(IOobject("nut", runTime.timeName(), mesh,
-                               IOobject::MUST_READ, IOobject::NO_WRITE),
-        mesh);
-    _nut() = nut_new;
+    // Every field is reset to the initial condition on disk.
+    resetFieldFromDisk(_U(), "U", mesh);
+    resetFieldFromDisk(_p(), "p", mesh);
+    resetFieldFromDisk(_nut(), "nut", mesh);
+    resetFieldFromDisk(_k(), "k", mesh);
+    resetFieldFromDisk(_omega(), "omega", mesh);
+    resetFieldFromDisk(_UliftBC(), "UliftBC", mesh);
 
-    volScalarField UliftBC_new(IOobject("UliftBC", runTime.timeName(), mesh,
-                                   IOobject::MUST_READ, IOobject::NO_WRITE),
-        mesh);
-    _UliftBC() = UliftBC_new;
+    IOobject phiIO("phi", runTime.timeName(), mesh, IOobject::MUST_READ, IOobject::NO_WRITE, IOobject::NO_REGISTER);
+    if (phiIO.typeHeaderOk<surfaceScalarField>(true))
+    {
+        resetFieldFromDisk(_phi(), "phi", mesh);
+    } else
+    {
+        // As in createPhi.H
+        _phi() == (linearInterpolate(_U()) & mesh.Sf());
+        _phi().clearOldTimes();
+    }
+
+    if (_Uf.valid())
+    {
+        _Uf() == fvc::interpolate(_U());
+        _Uf().clearOldTimes();
+    }
+
+    // The turbulence model is rebuilt below and reads its own k and omega from disk
     _laminarTransport.clear();
     _laminarTransport = autoPtr<singlePhaseTransportModel>(new singlePhaseTransportModel(_U(), _phi()));
     turbulence.clear();
@@ -510,25 +563,114 @@ void LSPGUnsteadyNSTurb::computePOD()
     int nModesK = ITHACAdict->lookupOrDefault<int>("NmodesKout", 0);
     int nModesOmega = ITHACAdict->lookupOrDefault<int>("NmodesOmegaout", 0);
     int nModesNut = ITHACAdict->lookupOrDefault<int>("NmodesNutout", 0);
+
     if (bcMethod == "lift")
     {
         setupLift();
-        ITHACAPOD::getModes(Uomfield, Umodes, _U().name(), podex, 0, 0, nModesU, true);
-        getPhiModes(Umodes, Uomfield, Phimodes, Phiomfield);
+    }
+    PtrList<volVectorField>& Usnapshots = (bcMethod == "lift") ? Uomfield : Ufield;
+    PtrList<surfaceScalarField>& Phisnapshots = (bcMethod == "lift") ? Phiomfield : Phifield;
+
+    // Copies of the snapshots used for the POD only, normalised per run if requested.
+    // The snapshot lists themselves are left untouched: the ROM state is the projection of the real fields.
+    const bool normalize = snapshotNormalization == "run";
+    if (podex)
+    {
+        WarningInFunction
+            << "The modes in ITHACAoutput/POD are read from disk: the POD (and snapshotNormalization "
+            << snapshotNormalization << ") is not recomputed. Delete ITHACAoutput/POD to recompute it." << endl;
+    }
+    const List<scalar> uScales = normalize ? runScales(Usnapshots, "U") : List<scalar>();
+    PtrList<volVectorField> Upod = scaledByRun(Usnapshots, uScales);
+
+    // phi is tied to the U coefficients (getPhiModes), so it must be scaled exactly like U.
+    // So are the fields of the stacked POD: a snapshot of the group is scaled as a whole
+    auto scalesOf = [&](const PtrList<volScalarField>& snapshots, const word& fieldName)
+    {
+        if (!normalize)
+        {
+            return List<scalar>();
+        }
+        return jointPOD.found(fieldName) ? uScales : runScales(snapshots, fieldName);
+    };
+    PtrList<surfaceScalarField> Phipod = scaledByRun(Phisnapshots, uScales);
+    PtrList<volScalarField> Ppod = scaledByRun(Pfield, scalesOf(Pfield, "p"));
+    PtrList<volScalarField> kpod = scaledByRun(kfield, scalesOf(kfield, "k"));
+    PtrList<volScalarField> omegapod = scaledByRun(omegafield, scalesOf(omegafield, "omega"));
+    PtrList<volScalarField> nutpod = scaledByRun(fluctNutfield, normalize ? runScales(fluctNutfield, "nut") : List<scalar>());
+
+    if (jointPOD.size())
+    {
+        computeJointPOD(Upod, Phipod, Ppod, kpod, omegapod, nModesU);
     } else
     {
-        ITHACAPOD::getModes(Ufield, Umodes, _U().name(), podex, 0, 0, nModesU, true);
-        getPhiModes(Umodes, Ufield, Phimodes, Phifield);
+        ITHACAPOD::getModes(Upod, Umodes, _U().name(), podex, 0, 0, nModesU, true);
+        getPhiModes(Umodes, Upod, Phimodes, Phipod);
     }
-    ITHACAPOD::getModes(omegafield, omegamodes, "omega", podex, 0, 0, nModesOmega, false);
-    ITHACAPOD::getModes(kfield, kmodes, "k", podex, 0, 0, nModesK, true);
-    ITHACAPOD::getModes(Pfield, Pmodes, _p().name(), podex, 0, 0, nModesP, true);
-    ITHACAPOD::getModes(fluctNutfield, nutmodes, fluctNutfield[0].name(), podex, 0, 0, nModesNut, true);
+    if (!jointPOD.found("omega"))
+    {
+        ITHACAPOD::getModes(omegapod, omegamodes, "omega", podex, 0, 0, nModesOmega, false);
+    }
+    if (!jointPOD.found("k"))
+    {
+        ITHACAPOD::getModes(kpod, kmodes, "k", podex, 0, 0, nModesK, true);
+    }
+    if (!jointPOD.found("p"))
+    {
+        ITHACAPOD::getModes(Ppod, Pmodes, _p().name(), podex, 0, 0, nModesP, true);
+    }
+    ITHACAPOD::getModes(nutpod, nutmodes, fluctNutfield[0].name(), podex, 0, 0, nModesNut, true);
+    
     // Assert that the modes are not empty
     M_Assert(Umodes.size() > 0, "Velocity modes are empty.");
     M_Assert(nutmodes.size() > 0, "Nut modes are empty.");
     M_Assert(Pmodes.size() > 0, "Pressure modes are empty.");
     M_Assert(Phimodes.size() > 0, "Phi modes are empty.");
+}
+
+template <class FieldType>
+List<scalar> LSPGUnsteadyNSTurb::runScales(const PtrList<FieldType>& snapshots, const word& fieldName) const
+{
+    // RMS of the L2 norms of the snapshots of each run (parameter sample)
+    List<scalar> scales(timeSnapshots.size(), 1.0);
+    label offset = 0;
+    forAll(timeSnapshots, run)
+    {
+        const label nSnap = timeSnapshots[run].size();
+        M_Assert(offset + nSnap <= snapshots.size(), "runScales: the snapshot list is shorter than the runs in timeSnapshots.");
+        scalar sumSq = 0.0;
+        for (label j = 0; j < nSnap; j++)
+        {
+            sumSq += sqr(ITHACAutilities::L2Norm(snapshots[offset + j]));
+        }
+        const scalar rms = nSnap > 0 ? Foam::sqrt(sumSq / nSnap) : 0.0;
+        scales[run] = rms > VSMALL ? rms : 1.0;
+        offset += nSnap;
+    }
+    M_Assert(offset == snapshots.size(), "runScales: the runs in timeSnapshots do not cover the snapshot list.");
+    Info << "### POD - Per-run normalisation of " << fieldName << ", scales: " << scales << endl;
+    return scales;
+}
+
+template <class FieldType>
+PtrList<FieldType> LSPGUnsteadyNSTurb::scaledByRun(const PtrList<FieldType>& snapshots, const List<scalar>& scales) const
+{
+    PtrList<FieldType> scaled(snapshots.size());
+    label offset = 0;
+    forAll(timeSnapshots, run)
+    {
+        const label nSnap = timeSnapshots[run].size();
+        const scalar factor = scales.empty() ? 1.0 : 1.0 / scales[run];
+        for (label j = 0; j < nSnap && offset + j < snapshots.size(); j++)
+        {
+            scaled.set(offset + j, snapshots[offset + j].clone());
+            // == forces the boundary values too (+=, *= are no-ops on fixedValue patches)
+            scaled[offset + j] == factor * snapshots[offset + j];
+        }
+        offset += nSnap;
+    }
+    M_Assert(offset == snapshots.size(), "scaledByRun: the runs in timeSnapshots do not cover the snapshot list.");
+    return scaled;
 }
 
 void LSPGUnsteadyNSTurb::setupLift()
@@ -600,6 +742,114 @@ void LSPGUnsteadyNSTurb::getPhiModes(
         Phimodes.set(i, phiMode.clone());
     }
     ITHACAstream::exportFields(Phimodes, "./ITHACAoutput/POD", "phi");
+}
+
+namespace
+{
+/// Modes as linear combinations of the snapshots: mode_i = sum_n W(n, i) snapshot_n
+template <class Type, template <class> class PatchField, class GeoMesh>
+void combineSnapshots(
+    const PtrList<GeometricField<Type, PatchField, GeoMesh>>& snapshots,
+    const Eigen::MatrixXd& W,
+    const word& fieldName,
+    PtrList<GeometricField<Type, PatchField, GeoMesh>>& modes)
+{
+    modes.setSize(W.cols());
+    for (label i = 0; i < W.cols(); i++)
+    {
+        GeometricField<Type, PatchField, GeoMesh> mode(fieldName, 0 * snapshots[0]);
+        for (label n = 0; n < snapshots.size(); n++)
+        {
+            // == forces the boundary values too (+= is a no-op on fixedValue patches)
+            mode == mode + W(n, i) * snapshots[n];
+        }
+        modes.set(i, mode.clone());
+    }
+}
+}
+
+void LSPGUnsteadyNSTurb::computeJointPOD(
+    PtrList<volVectorField>& Upod,
+    PtrList<surfaceScalarField>& Phipod,
+    PtrList<volScalarField>& Ppod,
+    PtrList<volScalarField>& kpod,
+    PtrList<volScalarField>& omegapod,
+    const label nModes)
+{
+    Info << "### MESSAGE - Stacked POD of " << jointPOD << " (always recomputed, ITHACAoutput/POD is not used for these fields)" << endl;
+    const word folder("./ITHACAoutput/PODjoint");
+    const wordList fieldNames({ "U", "p", "k", "omega" });
+    const label m = Upod.size();
+
+    // User multipliers of the weights, in the order of jointPOD (default 1)
+    const scalarList userWeights = ITHACAdict->lookupOrDefault<scalarList>("jointPODWeights", scalarList(jointPOD.size(), 1.0));
+    M_Assert(userWeights.size() == jointPOD.size(), "jointPODWeights must have one entry per field of jointPOD.");
+
+    // Volume-weighted correlation matrix of each field of the group. The weight 1 / (mean snapshot energy)
+    // gives every field the same share of the total energy, before the user multipliers
+    Eigen::MatrixXd C = Eigen::MatrixXd::Zero(m, m);
+    forAll(jointPOD, j)
+    {
+        const label f = fieldNames.find(jointPOD[j]);
+        Eigen::MatrixXd Cf;
+        switch (f)
+        {
+            case 0: Cf = ITHACAutilities::getMassMatrix(Upod); break;
+            case 1: Cf = ITHACAutilities::getMassMatrix(Ppod); break;
+            case 2: Cf = ITHACAutilities::getMassMatrix(kpod); break;
+            default: Cf = ITHACAutilities::getMassMatrix(omegapod); break;
+        }
+        const scalar meanEnergy = Cf.trace() / m;
+        M_Assert(meanEnergy > 0, "computeJointPOD: a field of jointPOD has zero snapshots.");
+        jointPODWeights(f) = userWeights[j] / meanEnergy;
+        C += jointPODWeights(f) * Cf;
+    }
+    Info << "### Stacked POD weights (U p k omega): " << jointPODWeights.transpose() << endl;
+
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(C);
+    const Eigen::VectorXd lambda = eig.eigenvalues().reverse();
+    const Eigen::MatrixXd vectors = eig.eigenvectors().rowwise().reverse();
+    label nKeep = min(nModes, m);
+    while (nKeep > 0 && !(lambda(nKeep - 1) > 1e-12 * lambda(0)))
+    {
+        nKeep--;
+    }
+    M_Assert(nKeep > 0, "computeJointPOD: no modes with a positive eigenvalue.");
+    Eigen::MatrixXd W = vectors.leftCols(nKeep);
+    for (label i = 0; i < nKeep; i++)
+    {
+        W.col(i) /= Foam::sqrt(lambda(i));
+    }
+    const Eigen::VectorXd energy = lambda / lambda.sum();
+    Info << "### Stacked POD: " << nKeep << " modes, cumulative energy of the first 5/10/15: "
+         << energy.head(min(5, m)).sum() << " " << energy.head(min(10, m)).sum() << " "
+         << energy.head(min(15, m)).sum() << endl;
+    
+    // Here we reconstruct the modes of each field as linear combinations of the snapshots, using the eigenvectors W
+    combineSnapshots(Upod, W, _U().name(), Umodes);
+    combineSnapshots(Phipod, W, _phi().name(), Phimodes);
+    ITHACAstream::exportFields(Umodes, folder, _U().name());
+    ITHACAstream::exportFields(Phimodes, folder, _phi().name());
+    if (jointPOD.found("p"))
+    {
+        combineSnapshots(Ppod, W, _p().name(), Pmodes);
+        ITHACAstream::exportFields(Pmodes, folder, _p().name());
+    }
+    if (jointPOD.found("k"))
+    {
+        combineSnapshots(kpod, W, word("k"), kmodes);
+        ITHACAstream::exportFields(kmodes, folder, "k");
+    }
+    if (jointPOD.found("omega"))
+    {
+        combineSnapshots(omegapod, W, word("omega"), omegamodes);
+        ITHACAstream::exportFields(omegamodes, folder, "omega");
+    }
+    if (Pstream::master())
+    {
+        Eigen::MatrixXd lambdaOut = lambda;
+        ITHACAstream::exportMatrix(lambdaOut, "eigenvalues", "eigen", folder);
+    }
 }
 
 void LSPGUnsteadyNSTurb::liftSolve()
