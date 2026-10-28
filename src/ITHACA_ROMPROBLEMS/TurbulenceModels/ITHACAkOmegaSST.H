@@ -80,7 +80,7 @@ namespace ITHACATurbulenceModels
         virtual PtrList<fvScalarMatrix> assembleEquations(fv::options& fvOptions);
 
         virtual void reconstructTurbulenceFields(
-            const Eigen::VectorXd& stateCoeffs) override;
+            const Eigen::Ref<const Eigen::VectorXd>& stateCoeffs) override;
 
         virtual void boundTurbulenceFields() override;
 

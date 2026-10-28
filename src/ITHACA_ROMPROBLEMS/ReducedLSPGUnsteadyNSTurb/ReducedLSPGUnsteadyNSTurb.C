@@ -647,9 +647,10 @@ void ReducedLSPGUnsteadyNSTurb::reconstructReducedFields(
     surfaceScalarField& phi_field,
     bool correctBCs)
 {
-    velocity_field = Umodes_.reconstruct(velocity_field, state.head(numberOfModes_.velocity), "U_r");
-    phi_field = Phimodes_.reconstruct(phi_field, state.head(numberOfModes_.velocity), "phi_r");
-    pressure_field = Pmodes_.reconstruct(pressure_field, state.segment(numberOfModes_.velocity, numberOfModes_.pressure), "p_r");
+    Umodes_.reconstructInPlace(velocity_field, state.head(numberOfModes_.velocity), "U_r");
+    Phimodes_.reconstructInPlace(phi_field, state.head(numberOfModes_.velocity), "phi_r");
+    // No BC correction here: the pressure BCs are corrected below, after the offset fields are added
+    Pmodes_.reconstructInPlace(pressure_field, state.segment(numberOfModes_.velocity, numberOfModes_.pressure), "p_r", false);
     turbulence->reconstructTurbulenceFields(state.tail(numberOfModes_.k + numberOfModes_.omega));
 
     if (romSettings_.bcMethod == "lift")

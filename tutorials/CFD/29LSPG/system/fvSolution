@@ -73,6 +73,13 @@ solvers
     }
 }
 
+cache
+{
+  grad(U_r);
+  grad(k_r);
+  grad(omega_r);
+}
+
 SIMPLE
 {
     nNonOrthogonalCorrectors 2;
