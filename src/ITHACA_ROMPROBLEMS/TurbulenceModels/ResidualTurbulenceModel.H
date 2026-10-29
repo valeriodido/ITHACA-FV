@@ -1,5 +1,6 @@
-// Implements a base class for turbulence models that compute the residual of the turbulence equations.
-// To be used in LSPG ROMs.
+// Base class of the eddy-viscosity closures of the LSPG ROMs: they assemble the residual of their transport
+// equations from the current fields, without solving them. The closure only describes the physics; the
+// reduced representation of its transported fields (modes, affine reference, output) is handled by the ROM.
 // Specific turbulence models should inherit from this class
 
 #ifndef RESIDUALTURBULENCEMODEL_H
@@ -8,7 +9,6 @@
 #include "fvCFD.H"
 #include "fvOptions.H"
 #include "tmp.H"
-#include <Eigen/Dense>
 
 namespace Foam
 {
@@ -22,11 +22,6 @@ namespace ITHACATurbulenceModels
             volScalarField& nut;
             const volVectorField& U;
             const surfaceScalarField& phi;
-        };
-
-        struct ReducedModes 
-        {
-          virtual ~ReducedModes() = default;
         };
 
         ResidualEddyViscosityTurbulenceModel(
@@ -46,30 +41,16 @@ namespace ITHACATurbulenceModels
         // Linear Eddy Viscosity stress divergence term
         tmp<fvVectorMatrix> divDevReff() const;
 
-        // Base method to reconstruct from POD
-        virtual void reconstructTurbulenceFields(const Eigen::Ref<const Eigen::VectorXd>& stateCoeffs) = 0;
+        // Called after the transported fields were set from the reduced state: restores their Dirichlet
+        // values (mode reconstruction overwrites them) and bounds them to ensure physicality
+        virtual void constrainTransportedFields() = 0;
 
-        // Base method to bound turbulence fields to ensure physicality
-        virtual void boundTurbulenceFields() = 0;
-
-        // Cells clipped by the last boundTurbulenceFields call, one mask per transported field
+        // Cells clipped by the last constrainTransportedFields call, one mask per transported field
         // in the order of transportedFields(). Used by the solver diagnostics; empty if not tracked
         virtual List<boolList> clippedCells() const
         {
             return List<boolList>();
         }
-
-        // Base method to compute the initial POD coefficients from fields
-        virtual void computePODCoeffsFromFields(Eigen::Ref<Eigen::VectorXd> stateCoeffs) = 0;
-
-        // Removes the initial 0 field from the turbulent quantities - See consistent POD from Carlberg
-        virtual void removeInitialZeroField(const Eigen::VectorXd weights) = 0;
-
-        // Adds the initial 0 field to the turbulent quantities - See consistent POD from Carlberg
-        virtual void addInitialZeroField(const Eigen::VectorXd weights) = 0;
-
-        // Saves the current fields to disk for post-processing
-        virtual void saveFieldsToDisk(const Time& runTime, const word folder) const = 0;
 
     protected:
         const fvMesh& mesh_;

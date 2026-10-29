@@ -262,7 +262,7 @@ void ReducedLSPGUnsteadyBBTurb::reconstructReducedFields(
     Eigen::VectorXd aggregatedBCs = Eigen::VectorXd(bcsU.size() + bcsT.size());
     aggregatedBCs << bcsU, bcsT;
     
-    if (romSettings_.bcMethod == "lift")
+    if (affineSettings_.type == AffineReferenceType::Lift)
     {
         for (label i = 0; i < inletIndex_.rows(); ++i)
         {
@@ -280,7 +280,7 @@ void ReducedLSPGUnsteadyBBTurb::reconstructReducedFields(
             ITHACAutilities::assignBC(temperature_field, patchID, bcsT(i));
             temperature_field += liftFieldsT_[i] * bcsT(i);
         }
-    } else if (romSettings_.snapshotCollectionMethod == 1) // Consistent method by carlberg, snapshots are centered to their initial condition for the offline trajectories
+    } else if (affineSettings_.type == AffineReferenceType::InitialCondition) // Consistent method by carlberg, snapshots are centered to their initial condition for the offline trajectories
     {
         const Eigen::VectorXd weights = interpolateIDW(aggregatedBCs);
         for (int k = 0; k < weights.size(); k++)
@@ -374,7 +374,7 @@ void ReducedLSPGUnsteadyBBTurb::initializePODCoeffsFromFields()
     Eigen::VectorXd aggregatedBCs = Eigen::VectorXd(boundaryConditionsU_.getCurrentBCs().size() + boundaryConditionsT_.getCurrentBCs().size());
     aggregatedBCs << boundaryConditionsU_.getCurrentBCs(), boundaryConditionsT_.getCurrentBCs();
 
-    if (romSettings_.bcMethod == "lift")
+    if (affineSettings_.type == AffineReferenceType::Lift)
     {
         for (int i = 0; i < liftFields_.size(); i++)
         {
@@ -385,7 +385,7 @@ void ReducedLSPGUnsteadyBBTurb::initializePODCoeffsFromFields()
         {
             T -= boundaryConditionsT_.getCurrentBCs()(i) * liftFieldsT_[i];
         }
-    } else if (romSettings_.snapshotCollectionMethod == 1) // Snapshots obtained by subtracting the initial snapshot
+    } else if (affineSettings_.type == AffineReferenceType::InitialCondition) // Snapshots obtained by subtracting the initial snapshot
     {
         const Eigen::VectorXd weights = interpolateIDW(aggregatedBCs);
         for (int k = 0; k < weights.size(); k++)

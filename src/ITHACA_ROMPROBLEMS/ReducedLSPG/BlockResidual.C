@@ -109,6 +109,11 @@ int BlockResidual::numBlocks() const
     return static_cast<int>(blocks_.size());
 }
 
+const std::string& BlockResidual::name(int block_index) const
+{
+    return at(block_index).name;
+}
+
 void BlockResidual::calibrateWeights(double minRelative)
 {
   const std::size_t nBlocks = blocks_.size();

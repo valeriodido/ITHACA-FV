@@ -14,21 +14,13 @@ namespace ITHACATurbulenceModels
         const fvMesh& mesh,
         const Time& runTime,
         const SharedFields& shared,
-        volScalarModes& kModes,
-        volScalarModes& omegaModes,
-        PtrList<volScalarField> k0Fields,
-        PtrList<volScalarField> omega0Fields,
+        const PtrList<volScalarField>& k0Fields,
+        const PtrList<volScalarField>& omega0Fields,
         const dictionary& kOmegaSSTCoeffs,
         const scalar boundFactor,
         const word& GName):
 
         ResidualEddyViscosityTurbulenceModel(mesh, runTime, shared),
-
-        kModes_(kModes),
-        omegaModes_(omegaModes),
-
-        k0Fields_(k0Fields),
-        omega0Fields_(omega0Fields),
 
         k_(mesh.lookupObjectRef<volScalarField>("k_r")),
         omega_(mesh.lookupObjectRef<volScalarField>("omega_r")),
@@ -100,13 +92,13 @@ namespace ITHACATurbulenceModels
         };
         scalar kRef = minPositive(k_, GREAT);
         scalar omegaRef = minPositive(omega_, GREAT);
-        forAll(k0Fields_, i)
+        forAll(k0Fields, i)
         {
-            kRef = minPositive(k0Fields_[i], kRef);
+            kRef = minPositive(k0Fields[i], kRef);
         }
-        forAll(omega0Fields_, i)
+        forAll(omega0Fields, i)
         {
-            omegaRef = minPositive(omega0Fields_[i], omegaRef);
+            omegaRef = minPositive(omega0Fields[i], omegaRef);
         }
         if (kRef < GREAT)
         {
@@ -228,19 +220,6 @@ namespace ITHACATurbulenceModels
         eqs.set(1, omegaEqn.ptr());
 
         return eqs;
-    }
-
-    void ResidualAssemblerSST::reconstructTurbulenceFields(
-        const Eigen::Ref<const Eigen::VectorXd>& stateCoeffs)
-    {
-        const label nKModes = kModes_.size();
-        const label nOmegaModes = omegaModes_.size();
-
-        kModes_.reconstructInPlace(k_, stateCoeffs.head(nKModes), "k_r");
-        omegaModes_.reconstructInPlace(omega_, stateCoeffs.segment(nKModes, nOmegaModes), "omega_r");
-
-        imposeDirichletValues(k_, kDirichletPatches_, kDirichletValues_);
-        imposeDirichletValues(omega_, omegaDirichletPatches_, omegaDirichletValues_);
     }
 
     void ResidualAssemblerSST::cacheDirichletValues(
@@ -449,8 +428,12 @@ namespace ITHACATurbulenceModels
         field.boundaryFieldRef() = max(field.boundaryField(), fieldMin.value());
     }
 
-    void ResidualAssemblerSST::boundTurbulenceFields()
+    void ResidualAssemblerSST::constrainTransportedFields()
     {
+        // Mode reconstruction overwrites the Dirichlet values, and += / -= are no-ops on fixedValue patches
+        imposeDirichletValues(k_, kDirichletPatches_, kDirichletValues_);
+        imposeDirichletValues(omega_, omegaDirichletPatches_, omegaDirichletValues_);
+
         boundField(k_, kMin_, kClipped_);
         boundField(omega_, omegaMin_, omegaClipped_);
 
@@ -462,42 +445,6 @@ namespace ITHACATurbulenceModels
         {
             omega_.boundaryFieldRef()[wp.patchi] == omega_.boundaryField()[wp.patchi].patchInternalField();
         }
-    }
-
-    void ResidualAssemblerSST::computePODCoeffsFromFields(Eigen::Ref<Eigen::VectorXd> stateCoeffs)
-    {
-        const label nKModes = kModes_.size();
-        const label nOmegaModes = omegaModes_.size();
-
-        Eigen::VectorXd kCoeffs = ITHACAutilities::getCoeffs(k_, kModes_);
-        Eigen::VectorXd omegaCoeffs = ITHACAutilities::getCoeffs(omega_, omegaModes_);
-
-        stateCoeffs.head(nKModes) = kCoeffs;
-        stateCoeffs.segment(nKModes, nOmegaModes) = omegaCoeffs;
-    }
-
-    void ResidualAssemblerSST::removeInitialZeroField(const Eigen::VectorXd weights)
-    {
-        for (label i = 0; i < weights.size(); ++i)
-        {
-            k_ -= weights(i) * k0Fields_[i];
-            omega_ -= weights(i) * omega0Fields_[i];
-        }
-    }
-
-    void ResidualAssemblerSST::addInitialZeroField(const Eigen::VectorXd weights)
-    {
-        for (label i = 0; i < weights.size(); ++i)
-        {
-            k_ += weights(i) * k0Fields_[i];
-            omega_ += weights(i) * omega0Fields_[i];
-        }
-    }
-
-    void ResidualAssemblerSST::saveFieldsToDisk(const Time& runTime, const word folder) const
-    {
-      ITHACAstream::exportSolution(k_, name(runTime.time().value()), folder);
-      ITHACAstream::exportSolution(omega_, name(runTime.time().value()), folder);
     }
 }
 }

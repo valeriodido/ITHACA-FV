@@ -23,8 +23,8 @@ License
     along with ITHACA-FV. If not, see <http://www.gnu.org/licenses/>.
 Description
     Diagnostics of the pressure (continuity) residual of the LSPG ROM.
-    The pressure equation is assembled exactly as in ReducedLSPGUnsteadyNSTurb/pEqn.H, and the
-    residual is split into its terms and into regions (cells next to each patch, interior).
+    The pressure equation is assembled by IncompressibleNSEquations::PressureSystem, as in the ROM, and
+    the residual is split into its terms and into regions (cells next to each patch, interior).
     Used on the FOM states in memory (TestLSPG, end of each converged time step) and on the
     same states read back from disk (V1 consistency test), with identical code and norms.
     Norms are Jacobi-weighted as in the ROM preconditioner, sqrt(V) R / |a_ii|, i.e. pressure
@@ -36,9 +36,7 @@ Description
 
 #include "fvCFD.H"
 #include "IOMRFZoneList.H"
-#include "constrainHbyA.H"
-#include "constrainPressure.H"
-#include "adjustPhi.H"
+#include "IncompressibleNSEquations.H"
 #include <ostream>
 #include <string>
 
@@ -62,7 +60,8 @@ struct Terms
     vectorField momentumCorrector;
 };
 
-//- Assembles the pressure equation as ReducedLSPGUnsteadyNSTurb/pEqn.H. UEqn must not contain grad(p)
+//- Terms of the pressure equation of the LSPG residual (IncompressibleNSEquations::PressureSystem).
+//  UEqn must not contain grad(p)
 inline Terms compute(
     const fvVectorMatrix& UEqn,
     volVectorField& U,
@@ -75,24 +74,16 @@ inline Terms compute(
     const fvMesh& mesh = U.mesh();
     const scalarField& V = mesh.V().field();
 
-    volScalarField rAU(1.0 / UEqn.A());
-    volVectorField HbyA(constrainHbyA(rAU * UEqn.H(), U, p));
-    const surfaceScalarField ddtCorrFlux(fvc::interpolate(rAU) * fvc::ddtCorr(U, phi));
-    surfaceScalarField phiHbyA("phiHbyA", fvc::flux(HbyA) + ddtCorrFlux);
-    MRF.makeRelative(phiHbyA);
-    adjustPhi(phiHbyA, U, p);
-    constrainPressure(p, U, phiHbyA, rAU, MRF);
-
-    fvScalarMatrix pEqn(fvm::laplacian(rAU, p) == fvc::div(phiHbyA));
-    pEqn.setReference(pRefCell, pRefValue);
+    const IncompressibleNSEquations::PressureSystem ps(UEqn, U, p, phi, MRF, pRefCell, pRefValue);
+    const fvScalarMatrix& pEqn = ps.pEqn();
 
     Terms t;
     t.R = pEqn.residual();
-    t.lap = fvc::laplacian(rAU, p)().primitiveField() * V;
-    t.divHbyA = fvc::div(fvc::flux(HbyA))().primitiveField() * V;
-    t.divDdtCorr = fvc::div(ddtCorrFlux)().primitiveField() * V;
+    t.lap = fvc::laplacian(ps.rAU, p)().primitiveField() * V;
+    t.divHbyA = fvc::div(fvc::flux(ps.HbyA))().primitiveField() * V;
+    t.divDdtCorr = fvc::div(ps.ddtCorrFlux)().primitiveField() * V;
     t.diag = mag(pEqn.A()().primitiveField()) * V;
-    t.momentumCorrector = U.primitiveField() - (HbyA.primitiveField() - rAU.primitiveField() * fvc::grad(p)().primitiveField());
+    t.momentumCorrector = U.primitiveField() - (ps.HbyA.primitiveField() - ps.rAU.primitiveField() * fvc::grad(p)().primitiveField());
     return t;
 }
 

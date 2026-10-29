@@ -44,7 +44,6 @@ SourceFiles
 #include "ResidualTurbulenceModel.H"
 #include "fvOptions.H"
 #include "wallDist.H"
-#include "Modes.H"
 #include "fixedValueFvPatchFields.H"
 #include "nearWallDist.H"
 #include <vector>
@@ -60,10 +59,8 @@ namespace ITHACATurbulenceModels
             const fvMesh& mesh,
             const Time& runTime,
             const SharedFields& shared,
-            volScalarModes& kModes,
-            volScalarModes& omegaModes,
-            PtrList<volScalarField> k0Fields,
-            PtrList<volScalarField> omega0Fields,
+            const PtrList<volScalarField>& k0Fields,
+            const PtrList<volScalarField>& omega0Fields,
             const dictionary& kOmegaSSTCoeffs,
             const scalar boundFactor = 0.1,
             const word& GName = "ResidualAssemblerSST:G");
@@ -79,31 +76,16 @@ namespace ITHACATurbulenceModels
 
         virtual PtrList<fvScalarMatrix> assembleEquations(fv::options& fvOptions);
 
-        virtual void reconstructTurbulenceFields(
-            const Eigen::Ref<const Eigen::VectorXd>& stateCoeffs) override;
-
-        virtual void boundTurbulenceFields() override;
+        virtual void constrainTransportedFields() override;
 
         virtual List<boolList> clippedCells() const override
         {
             return List<boolList>({ kClipped_, omegaClipped_ });
         }
 
-        virtual void computePODCoeffsFromFields(Eigen::Ref<Eigen::VectorXd> stateCoeffs) override;
-
-        virtual void removeInitialZeroField(const Eigen::VectorXd weights) override;
-
-        virtual void addInitialZeroField(const Eigen::VectorXd weights) override;
-
-        virtual void saveFieldsToDisk(const Time& runTime, const word folder) const override;
-
     private:
         volScalarField& k_;
-        volScalarModes& kModes_;
-        PtrList<volScalarField> k0Fields_;
         volScalarField& omega_;
-        volScalarModes& omegaModes_;
-        PtrList<volScalarField> omega0Fields_;
                 
         const word GName_;
         autoPtr<volScalarField::Internal> G_;
@@ -166,7 +148,7 @@ namespace ITHACATurbulenceModels
         //- Unique cells adjacent to omega wall-function patches (rows fixed in the omega equation)
         labelList omegaWallCells_;
 
-        //- Cells clipped by the last boundTurbulenceFields call (diagnostics)
+        //- Cells clipped by the last constrainTransportedFields call (diagnostics)
         boolList kClipped_;
         boolList omegaClipped_;
 

@@ -41,7 +41,8 @@ Description
     does not vanish with s.
 \*---------------------------------------------------------------------------*/
 
-#include "ReducedLSPGUnsteadyNSTurb.H"
+#include "LMDiagnostics.H"
+#include "ITHACAassert.H"
 #include <Eigen/SVD>
 #include <fstream>
 #include <iomanip>
@@ -107,13 +108,33 @@ double kinkIndicator(
 }
 
 
-bool ReducedLSPGUnsteadyNSTurb::lmDiagnosticsTriggered(const std::string& status) const
+LMDiagnostics::LMDiagnostics(
+    const LMDiagnosticsSettings& settings,
+    const BlockResidual& residual,
+    const labelList& blocks,
+    const wordList& blockNames,
+    const wordList& coordinateLabels,
+    const surfaceScalarField& phi,
+    std::function<List<boolList>()> clippedCells)
+    : settings_(settings),
+      residual_(residual),
+      blocks_(blocks),
+      blockNames_(blockNames),
+      coordinateLabels_(coordinateLabels),
+      phi_(phi),
+      clippedCells_(std::move(clippedCells))
 {
-    if (!lmDiagnostics_.enabled || nDiagnosticDumps_ >= lmDiagnostics_.maxDumps)
+    M_Assert(blocks_.size() == blockNames_.size(), "LMDiagnostics: one name per block is needed.");
+}
+
+
+bool LMDiagnostics::triggered(const std::string& status) const
+{
+    if (!settings_.enabled || nDumps_ >= settings_.maxDumps)
     {
         return false;
     }
-    for (const word& trigger : lmDiagnostics_.triggers)
+    for (const word& trigger : settings_.triggers)
     {
         // lmStatusToString may append the tolerance name, e.g. "RelativeReductionTooSmall (ftol)"
         if (status.rfind(trigger, 0) == 0)
@@ -125,14 +146,14 @@ bool ReducedLSPGUnsteadyNSTurb::lmDiagnosticsTriggered(const std::string& status
 }
 
 
-void ReducedLSPGUnsteadyNSTurb::runLMDiagnostics(
+void LMDiagnostics::run(
     const LevenbergMarquardtFunctor& functor,
     const Eigen::VectorXd& y,
     const std::string& status,
-    const word& folder)
+    const word& folder,
+    const scalar time)
 {
-    nDiagnosticDumps_++;
-    const scalar time = runTime().value();
+    nDumps_++;
     const word dumpFolder(folder + "/lmDiagnostics/" + name(time) + "/");
     if (Pstream::master())
     {
@@ -142,18 +163,18 @@ void ReducedLSPGUnsteadyNSTurb::runLMDiagnostics(
          << dumpFolder << endl;
 
     const label n = y.size();
-    const label m = residualWorkspace_.size();
-    const scalarList& steps = lmDiagnostics_.steps;
+    const label m = residual_.size();
+    const scalarList& steps = settings_.steps;
     const scalar smallestStep = min(steps);
 
-    // Blocks of the tables, in this order; phi is reported as 0 without the flux residual
-    const List<label> blocks({ iU_, iP_, iK_, iOmega_, iPhi_ });
-    const wordList blockNames({ "U", "p", "k", "omega", "phi" });
+    // Blocks of the tables, in this order; an absent block (e.g. phi without the flux residual) is reported as 0
+    const labelList& blocks = blocks_;
+    const wordList& blockNames = blockNames_;
     const label nBlocks = blocks.size();
 
     auto segment = [&](const Eigen::VectorXd& v, const label b) -> Eigen::Ref<const Eigen::VectorXd>
     {
-        return v.segment(residualWorkspace_.blockOffset(blocks[b]), residualWorkspace_.blockSize(blocks[b]));
+        return v.segment(residual_.blockOffset(blocks[b]), residual_.blockSize(blocks[b]));
     };
 
     auto evaluate = [&](const Eigen::VectorXd& yy) -> Evaluation
@@ -161,8 +182,8 @@ void ReducedLSPGUnsteadyNSTurb::runLMDiagnostics(
         Evaluation e;
         e.r.resize(m);
         functor(yy, e.r);
-        e.clipped = turbulence->clippedCells();
-        const scalarField& phiI = _phi().primitiveField();
+        e.clipped = clippedCells_();
+        const scalarField& phiI = phi_.primitiveField();
         e.phiPositive.setSize(phiI.size());
         forAll(phiI, facei)
         {
@@ -184,23 +205,8 @@ void ReducedLSPGUnsteadyNSTurb::runLMDiagnostics(
         return s;
     };
 
-    // Labels of the reduced coordinates
-    wordList coordinateLabels(n);
-    {
-        // Same order as stateMap_: the shared coefficients of the stacked POD first, then the other fields
-        const wordList fieldNames({ "U", "p", "k", "omega" });
-        const labelList fieldModes({ numberOfModes_.velocity, numberOfModes_.pressure, numberOfModes_.k, numberOfModes_.omega });
-        label j = 0;
-        if (stateMap_.size())
-        {
-            for (label i = 0; i < numberOfModes_.velocity; i++) coordinateLabels[j++] = "joint" + name(i + 1);
-        }
-        forAll(fieldNames, f)
-        {
-            if (jointField_[f]) continue;
-            for (label i = 0; i < fieldModes[f]; i++) coordinateLabels[j++] = fieldNames[f] + name(i + 1);
-        }
-    }
+    const wordList& coordinateLabels = coordinateLabels_;
+    M_Assert(coordinateLabels.size() == n, "LMDiagnostics: one label per reduced coordinate is needed.");
 
     std::ostringstream summary;
     summary << std::scientific << std::setprecision(3);
@@ -208,7 +214,7 @@ void ReducedLSPGUnsteadyNSTurb::runLMDiagnostics(
     // ------------------------------------------------------------------ 1. Point where LM stopped
     const Evaluation base = evaluate(y);
     const double r0 = base.r.norm();
-    const scalarField& phiBase = _phi().primitiveField();
+    const scalarField& phiBase = phi_.primitiveField();
     const scalar phiMax = max(mag(phiBase));
     label nNearZeroPhi = 0;
     forAll(phiBase, facei)
@@ -351,7 +357,7 @@ void ReducedLSPGUnsteadyNSTurb::runLMDiagnostics(
     // Per coordinate, at the smallest step: kink indicators and column norm
     Eigen::MatrixXd smallStepKink = Eigen::MatrixXd::Zero(n, nBlocks + 2);
 
-    if (lmDiagnostics_.coordinateScan)
+    if (settings_.coordinateScan)
     {
         std::ofstream out;
         if (Pstream::master())
@@ -489,7 +495,7 @@ void ReducedLSPGUnsteadyNSTurb::runLMDiagnostics(
         summary << "- Both directions decrease the residual for small enough steps: LM stopped on its own\n"
                 << "  tolerances/trust region rather than on a broken local model.\n";
     }
-    if (lmDiagnostics_.coordinateScan)
+    if (settings_.coordinateScan)
     {
         label smallI = 0;
         forAll(steps, sI)

@@ -111,6 +111,9 @@ class BlockResidual
 
     int numBlocks() const;
 
+    /// @brief Name of a block
+    const std::string& name(int block_index) const;
+
     /// @brief Calibrates the weights as 1/||block||
     void calibrateWeights(double minRelative=1e-8);
     // Hyper-reduction will go here

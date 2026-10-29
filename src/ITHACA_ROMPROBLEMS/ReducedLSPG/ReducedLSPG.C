@@ -28,95 +28,206 @@ Description
 SourceFiles
     ReducedLSPG.C
 \*---------------------------------------------------------------------------*/
-
 #include "ReducedLSPG.H"
+#include "LevenbergMarquardt.H"
 #include "ITHACAassert.H"
+#include "ITHACAsystem.H"
+#include "Foam2Eigen.H"
+#include <chrono>
+#include <fstream>
+#include <iomanip>
 
-ReducedLSPG::ReducedLSPG(std::shared_ptr<ITHACAcontext> context): context_(std::move(context))
+namespace
 {
-    if (!context_)
+std::shared_ptr<ITHACAcontext> checkedContext(std::shared_ptr<ITHACAcontext> context)
+{
+    if (!context)
     {
         FatalErrorInFunction
             << "Context pointer is null. Please provide a valid ITHACAcontext object."
             << exit(FatalError);
     }
-    ITHACAdict = new IOdictionary(
+    return context;
+}
+}
+
+ReducedLSPG::ReducedLSPG(std::shared_ptr<ITHACAcontext> context): context_(checkedContext(std::move(context))),
+                                                                  collector_(residual_, context_->mesh())
+{
+    ITHACAdict.reset(new IOdictionary(
         IOobject(
             "ITHACAdict",
             runTime().system(),
             mesh(),
             IOobject::MUST_READ,
-            IOobject::NO_WRITE));
-    romSettings_ = ROMSettings {
-        ITHACAdict->lookupOrDefault<word>("bcMethod", "lift"),
-        ITHACAdict->lookupOrDefault<word>("romID", ""),
-        ITHACAdict->lookupOrDefault<label>("snapshotCollectionMethod", 1),
-        ITHACAdict->lookupOrDefault<bool>("scaleResidualWithCellVolume", true),
-        ITHACAdict->lookupOrDefault<bool>("debug", false),
-        ITHACAdict->lookupOrDefault<bool>("fluxResidual", true),
-        ITHACAdict->lookupOrDefault<bool>("writeResidualFields", false),
-        ITHACAdict->lookupOrDefault<scalar>("jacobianStep", 1e-5),
-        ITHACAdict->lookupOrDefault<label>("jacobianOrder", 2),
-        ITHACAdict->lookupOrDefault<word>("residualPreconditioner", "none")
-    };
-    M_Assert(romSettings_.jacobianOrder == 1 || romSettings_.jacobianOrder == 2,
-        "jacobianOrder must be 1 (forward) or 2 (central) in ITHACAdict.");
-    M_Assert(romSettings_.residualPreconditioner == "none" || romSettings_.residualPreconditioner == "jacobi",
-        "Invalid residualPreconditioner in ITHACAdict. Valid options are 'none' or 'jacobi'.");
+            IOobject::NO_WRITE)));
+    romSettings_ = ROMSettings::read(*ITHACAdict);
+    affineSettings_ = AffineReferenceSettings::read(*ITHACAdict);
+    lmSettings_ = LMSolverSettings::read(ITHACAdict->subOrEmptyDict("lmSolver"));
+    Info << "### LM stopping criteria: gradientTol " << lmSettings_.gradientTol << ", reductionTol "
+         << lmSettings_.reductionTol << ", stepTol " << lmSettings_.stepTol << ", maxIterations "
+         << lmSettings_.maxIterations << endl;
 
-    M_Assert(romSettings_.bcMethod == "lift" || romSettings_.bcMethod == "None", "Invalid bcMethod specified in ITHACAdict. Valid options are 'lift' or 'none'.");
-    M_Assert(romSettings_.jacobianStep > 0, "jacobianStep must be > 0.");
-    M_Assert(romSettings_.bcMethod == "None" || romSettings_.snapshotCollectionMethod == 0, "If using bcMethod 'lift', snapshotCollectionMethod must be set to 0 in ITHACAdict.");
+    collector_.setPreconditioner(romSettings_.residualPreconditioner);
     nCells = mesh().nCells();
 }
 
-template <class Type>
-void ReducedLSPG::writeResidualField(
-    const word& name,
-    const fvMatrix<Type>& eqn,
-    const Field<Type>& R,
-    const fvMesh& mesh,
-    const bool perUnitVolume)
+
+void ReducedLSPG::setReportedBlocks(const labelList& blocks, const wordList& names)
 {
-    typedef GeometricField<Type, fvPatchField, volMesh> fieldType;
-
-    // fvMatrix residuals are integrated over the cell volume
-    const dimensionSet dims =
-        perUnitVolume ? eqn.dimensions() / dimVolume : eqn.dimensions();
-
-    fieldType res(
-        IOobject(
-            name,
-            mesh.time().timeName(),
-            mesh,
-            IOobject::NO_READ,
-            IOobject::NO_WRITE),
-        mesh,
-        dimensioned<Type>("zero", dims, Zero),
-        zeroGradientFvPatchField<Type>::typeName);
-
-    res.primitiveFieldRef() = R;
-    if (perUnitVolume)
-    {
-        res.primitiveFieldRef() /= mesh.V();
-    }
-    res.correctBoundaryConditions();
-
-    exportResidual(res);
+    M_Assert(blocks.size() == names.size(), "setReportedBlocks: one name per block is needed.");
+    reportedBlocks_ = blocks;
+    reportedBlockNames_ = names;
 }
-// Template instantiation for the types we expect to use
-template void ReducedLSPG::writeResidualField<scalar>(
-    const word& name,
-    const fvMatrix<scalar>& eqn,
-    const Field<scalar>& R,
-    const fvMesh& mesh,
-    const bool perUnitVolume);
-template void ReducedLSPG::writeResidualField<vector>(
-    const word& name,
-    const fvMatrix<vector>& eqn,
-    const Field<vector>& R,
-    const fvMesh& mesh,
-    const bool perUnitVolume);
+
+void ReducedLSPG::setCellVolumeRowWeights(const label block, const label nComponents)
+{
+    // Used to approximate a L2 norm of the residual block
+    const Eigen::VectorXd w = Foam2Eigen::field2Eigen(mesh().V().field()).cwiseSqrt().cwiseInverse();
+    Eigen::VectorXd rowWeights(nComponents * w.size());
+    for (label celli = 0; celli < w.size(); celli++)
+    {
+        rowWeights.segment(nComponents * celli, nComponents).setConstant(w(celli));
+    }
+    residual_.setBlockRowWeights(block, rowWeights);
+}
+
+double ReducedLSPG::reportedBlockNorm(const label i) const
+{
+    // If the block is not present we report 0. This is useful for when we have optional blocks that 
+    // are activated at runtime (for example via ITHACAdict).
+    return reportedBlocks_[i] >= 0 ? residual_.blockNorm(reportedBlocks_[i]) : 0.0;
+}
+
+Eigen::VectorXd ReducedLSPG::residualBlockWeights() const
+{
+    Eigen::VectorXd weights(reportedBlocks_.size());
+    forAll(reportedBlocks_, i)
+    {
+        weights(i) = reportedBlocks_[i] >= 0 ? residual_.blockWeight(reportedBlocks_[i]) : 0.0;
+    }
+    return weights;
+}
+
+void ReducedLSPG::printBlockNorms() const
+{
+    forAll(reportedBlocks_, i)
+    {
+        Info << "  - " << reportedBlockNames_[i] << " residual norm " << reportedBlockNorm(i) << nl;
+    }
+}
+
+
+void ReducedLSPG::runOnline(const word& folder)
+{
+    if (Pstream::master())
+    {
+        mkDir(folder);
+        ITHACAutilities::createSymLink(folder);
+    }
+    // Residual fields go to the ROM case folder (folder/0 is a link to the case 0 directory)
+    collector_.setOutputFolder(folder);
+    Time& runTime = this->runTime();
+
+#include "readTimeControls.H"
+
+    initializePODCoeffsFromFields();
+    collector_.requestPreconditionerUpdate();
+    assembleResidual(currentState_, true, true);
+
+    Info << "\nInitial residual norm: " << residual_.vector().norm() << nl;
+    printBlockNorms();
+    Info << endl;
+    if (romSettings_.residualPreconditioner == ResidualPreconditionerType::None)
+    {
+        residual_.calibrateWeights(1e-4);
+    }
+
+    // Per-step residual history, for post-processing (e.g. the consistency test)
+    std::ofstream residualLog;
+    std::string blockNames;
+    forAll(reportedBlockNames_, i)
+    {
+        blockNames += std::string(i ? " " : "") + reportedBlockNames_[i];
+    }
+    if (Pstream::master())
+    {
+        residualLog.open(folder + "/residualHistory.dat");
+        residualLog << std::scientific << std::setprecision(8)
+                    << "# deltaT " << runTime.deltaTValue() << nl
+                    << "# block weights (" << blockNames << "): " << residualBlockWeights().transpose() << nl
+                    << "# gradientCosine: max_j |J_j^T r| / (|J_j| |r|) at the last Jacobian evaluation" << nl
+                    << "# time initialTotal finalTotal";
+        for (const word& name : reportedBlockNames_)
+        {
+            residualLog << " " << name;
+        }
+        residualLog << " lmIterations nfev gradientCosine status" << std::endl;
+    }
+
+    // The functor provides its own finite-difference Jacobian (LevenbergMarquardtFunctor::df)
+    // At the moment i don't think this is a big advantage over Eigen's df, but it allows a bit
+    // more freedom in the future.
+    LMDriver lm(this, currentCoords_.size(), residual_.size(), lmSettings_);
+
+    const scalar writeInterval = runTime.controlDict().get<scalar>("writeInterval");
+    scalar nextWrite = runTime.value() + writeInterval;
+
+    auto start = std::chrono::high_resolution_clock::now();
+    while (runTime.run())
+    {
+        runTime++;
+        Info << "Time = " << runTime.time().value() << nl;
+        updateBoundaryConditions(runTime.time().value());
+
+        Eigen::VectorXd scaledState = currentCoords_.cwiseQuotient(stateScaling_);
+        // The first residual evaluation of the solve builds the preconditioner of the time step
+        collector_.requestPreconditionerUpdate();
+        const LMStepResult result = lm.solve(scaledState);
+        const std::string status = lmStatusToString(result.status);
+        if (result.status == Eigen::LevenbergMarquardtSpace::Running)
+        {
+            Info << "LM reached maximum iterations (" << lmSettings_.maxIterations << ") without converging." << nl;
+        }
+        Info << "LM stopped after " << result.iterations << " iterations (status = " << status
+             << ", gradient cosine = " << lm.gnorm() << ")" << nl;
+
+        diagnoseSolve(lm.functor(), scaledState, status, folder);
+
+        currentCoords_ = scaledState.cwiseProduct(stateScaling_);
+        currentState_ = fullState(scaledState);
+        // Final assembly at the converged state; optionally writes the residual fields in folder/<time>
+        assembleResidual(currentState_, true, romSettings_.writeResidualFields);
+
+        printBlockNorms();
+        Info << "  - Initial residual norm: " << result.initialNorm << nl
+             << "  - Final residual norm: " << residual_.vector().norm() << nl
+             << "  - Function evaluations: " << lm.nfev() << nl;
+        timeStepCompleted();
+        Info << endl;
+
+        if (Pstream::master())
+        {
+            residualLog << runTime.value() << " " << result.initialNorm << " " << residual_.vector().norm();
+            forAll(reportedBlocks_, i)
+            {
+                residualLog << " " << reportedBlockNorm(i);
+            }
+            residualLog << " " << result.iterations << " " << lm.nfev() << " " << lm.gnorm() << " "
+                        << status << std::endl;
+        }
+
+        if (runTime.value() >= nextWrite - 0.5 * runTime.deltaTValue())
+        {
+            writeFields(folder);
+            nextWrite += writeInterval;
+        }
+    }
+    collector_.setOutputFolder("");
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    Info << "Total computation time: " << duration.count() << " ms" << endl;
+}
 
 
 argList& ReducedLSPG::args() const

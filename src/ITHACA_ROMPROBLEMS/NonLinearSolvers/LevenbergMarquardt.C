@@ -54,3 +54,33 @@ std::string lmStatusToString(Eigen::LevenbergMarquardtSpace::Status status)
         default:                            return "Unknown";
     }
 }
+
+LMDriver::LMDriver(
+    ReducedLSPG* reducedProblem,
+    int nCoordinates,
+    int nResiduals,
+    const LMSolverSettings& settings)
+    : functor_(reducedProblem, nCoordinates, nResiduals),
+      lm_(functor_),
+      maxIterations_(settings.maxIterations)
+{
+    lm_.parameters.ftol = settings.reductionTol;
+    lm_.parameters.xtol = settings.stepTol;
+    lm_.parameters.gtol = settings.gradientTol;
+    lm_.parameters.maxfev = nCoordinates * 500;
+}
+
+LMStepResult LMDriver::solve(Eigen::VectorXd& y)
+{
+    using namespace Eigen::LevenbergMarquardtSpace;
+    LMStepResult result;
+    // minimizeInit evaluates the residual at the initial guess
+    result.status = lm_.minimizeInit(y);
+    result.initialNorm = lm_.fvec.norm();
+    while ((result.status == NotStarted || result.status == Running) && result.iterations < maxIterations_)
+    {
+        result.status = lm_.minimizeOneStep(y);
+        result.iterations++;
+    }
+    return result;
+}

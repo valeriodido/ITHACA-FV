@@ -3,3 +3,4 @@
 constant/polyMesh
 postProcessing/*
 *log*
+docFigures.py

@@ -120,4 +120,44 @@ struct LevenbergMarquardtFunctor
 /// @brief Converts the Levenberg-Marquardt status enum to a string representation.
 std::string lmStatusToString(Eigen::LevenbergMarquardtSpace::Status status);
 
+/// @brief Outcome of the LM solve of one time step
+struct LMStepResult
+{
+  Eigen::LevenbergMarquardtSpace::Status status;
+  //- LM iterations (Jacobian evaluations)
+  int iterations = 0;
+  //- Residual norm at the initial guess
+  double initialNorm = 0;
+};
+
+/// @brief Levenberg-Marquardt solve of the LSPG problem of a time step, with the stopping criteria of
+/// LMSolverSettings. The same object is reused for every time step
+class LMDriver
+{
+public:
+  LMDriver(ReducedLSPG* reducedProblem, int nCoordinates, int nResiduals, const LMSolverSettings& settings);
+
+  LMDriver(const LMDriver&) = delete;
+  LMDriver& operator=(const LMDriver&) = delete;
+
+  /// @brief Minimises the residual from the initial guess y (scaled coordinates), y is the solution on return.
+  /// Every stop other than Running is decided inside LM: gtol (stationarity, checked on the Jacobian at
+  /// the current point before stepping), ftol (reduction) or xtol (trust region), or a failure status
+  LMStepResult solve(Eigen::VectorXd& y);
+
+  const LevenbergMarquardtFunctor& functor() const { return functor_; }
+
+  //- Function evaluations of the last solve
+  Eigen::Index nfev() const { return lm_.nfev; }
+
+  //- Gradient cosine at the last Jacobian evaluation
+  double gnorm() const { return lm_.gnorm; }
+
+private:
+  LevenbergMarquardtFunctor functor_;
+  //- Holds a reference to functor_
+  Eigen::LevenbergMarquardt<LevenbergMarquardtFunctor> lm_;
+  label maxIterations_;
+};
+
 #endif

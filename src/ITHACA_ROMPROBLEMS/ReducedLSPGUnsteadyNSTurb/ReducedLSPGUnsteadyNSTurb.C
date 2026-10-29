@@ -1,8 +1,8 @@
 #include "ReducedLSPGUnsteadyNSTurb.H"
-#include "Foam2Eigen.H" // Needed to convert OpenFOAM fields to Eigen vectors and matrices
+#include "IncompressibleNSEquations.H"
+#include "ITHACAcoeffsMass.H"
 #include "ITHACAassign.H"
-#include <fstream>
-#include <iomanip>
+#include <cctype>
 
 namespace
 {
@@ -33,22 +33,6 @@ Eigen::VectorXd coefficientRMS(
     return rowRMS(ITHACAutilities::getCoeffs(snapshots, modes, modes.size()));
 }
 
-/// Adds w F^T V F to G and w F^T V S to B, with F the modes and S the snapshots (columns)
-template <class Type>
-void addJointProjection(
-    PtrList<GeometricField<Type, fvPatchField, volMesh>>& modes,
-    const Eigen::MatrixXd& snapshots,
-    const scalar w,
-    Eigen::MatrixXd& G,
-    Eigen::MatrixXd& B)
-{
-    const Eigen::MatrixXd F = Foam2Eigen::PtrList2Eigen(modes);
-    const Eigen::VectorXd V = ITHACAutilities::getMassMatrixFV(modes[0]);
-    const Eigen::MatrixXd FtV = F.transpose() * V.asDiagonal();
-    G += w * FtV * F;
-    B += w * FtV * snapshots;
-}
-
 /// RMS over the snapshots of sqrt(sum_cells |f|^2 V / sum V)
 template <class Type>
 scalar fieldRMS(const PtrList<GeometricField<Type, fvPatchField, volMesh>>& snapshots)
@@ -63,258 +47,146 @@ scalar fieldRMS(const PtrList<GeometricField<Type, fvPatchField, volMesh>>& snap
     }
     return Foam::sqrt(sumSq / snapshots.size());
 }
+
+/// Vectors stacked one after the other
+Eigen::VectorXd concatenate(const std::vector<Eigen::VectorXd>& parts)
+{
+    Eigen::Index n = 0;
+    for (const Eigen::VectorXd& v : parts)
+    {
+        n += v.size();
+    }
+    Eigen::VectorXd out(n);
+    n = 0;
+    for (const Eigen::VectorXd& v : parts)
+    {
+        out.segment(n, v.size()) = v;
+        n += v.size();
+    }
+    return out;
+}
+
+
+/// Number of projection modes of a field in ITHACAdict: Nmodes<Name>proj, e.g. NmodesUproj, NmodesOmegaproj
+label requestedModes(const dictionary& dict, const word& name)
+{
+    word key(name);
+    key[0] = std::toupper(key[0]);
+    const label n = dict.lookupOrDefault<label>("Nmodes" + key + "proj", 0);
+    M_Assert(n > 0, ("Number of " + name + " modes (Nmodes" + key + "proj) must be greater than zero.").c_str());
+    return n;
+}
+
+/// ROM name of a reduced field from the name of its OpenFOAM field, e.g. k_r -> k
+word reducedName(const word& fieldName)
+{
+    const bool suffix = fieldName.size() > 2 && fieldName.compare(fieldName.size() - 2, 2, "_r") == 0;
+    return suffix ? word(fieldName.substr(0, fieldName.size() - 2)) : fieldName;
+}
+
+/// Offline data of a reduced field: its modes, the snapshots the POD was computed on, and the reference
+/// fields of the affine reference
+template <class Type>
+struct OfflineFieldData {
+    const Modes<Type, fvPatchField, volMesh>& modes;
+    PtrList<GeometricField<Type, fvPatchField, volMesh>>& snapshots;
+    const PtrList<GeometricField<Type, fvPatchField, volMesh>>& references;
+};
+
+/// Offline data of a transported field of the closure
+OfflineFieldData<scalar> turbulenceData(LSPGUnsteadyNSTurb& fom, const word& name, const bool initialConditions)
+{
+    static const PtrList<volScalarField> none;
+    if (name == "k")
+    {
+        return { fom.kmodes, fom.kfield, initialConditions ? fom.k0field : none };
+    }
+    if (name == "omega")
+    {
+        return { fom.omegamodes, fom.omegafield, initialConditions ? fom.omega0field : none };
+    }
+    FatalErrorInFunction << "No offline data for the transported field " << name << exit(FatalError);
+    return { fom.kmodes, fom.kfield, none };
+}
+
+/// Position of a field in the inner product weights of the stacked POD (jointPODWeights), -1 if absent
+label jointWeightIndex(const word& name)
+{
+    return wordList({ "U", "p", "k", "omega" }).find(name);
+}
+
+/// Field of the case read from the current time directory, registered on the mesh and written automatically
+template <class FieldType>
+FieldType* readField(const word& name, const fvMesh& mesh)
+{
+    return new FieldType(
+        IOobject(name, mesh.time().timeName(), mesh, IOobject::MUST_READ, IOobject::AUTO_WRITE),
+        mesh);
+}
 }
 
 
 ReducedLSPGUnsteadyNSTurb::ReducedLSPGUnsteadyNSTurb(
     std::shared_ptr<ITHACAcontext> context,
-    const LSPGUnsteadyNSTurb& problem): ReducedLSPG(std::move(context))
+    const LSPGUnsteadyNSTurb& problem): ReducedLSPG(std::move(context)),
+                                        fluxResidual_(ITHACAdict->lookupOrDefault<bool>("fluxResidual", true)),
+                                        inletIndex_(problem.inletIndex),
+                                        affine_(affineSettings_, problem.mu)
 {
-    captureFOMData(problem);
+    createFields();
+    createTurbulenceModel(problem);
+    const TrainingStatistics stats = createReducedFields(problem);
+    createStateMap(problem);
+    setStateScaling(stats);
+    setFieldScales(stats);
+    createResidual();
 
+    lmDiagnostics_.reset(new LMDiagnostics(
+        LMDiagnosticsSettings::read(ITHACAdict->subOrEmptyDict("lmDiagnostics")),
+        residual_,
+        reportedBlocks(),
+        reportedBlockNames(),
+        coordinateLabels(),
+        phi_(),
+        [this]() { return turbulence_->clippedCells(); }));
+}
+
+
+void ReducedLSPGUnsteadyNSTurb::createFields()
+{
     Time& runTime = this->runTime();
     fvMesh& mesh = this->mesh();
-    pimpleControl& pimple = this->pimple();
 
-#include "createFields.H"
-    // turbulence = autoPtr<RBFTurbulence>(new RBFTurbulence(nut, nu)); // RBF approach
+    IOdictionary transportProperties(
+        IOobject(
+            "transportProperties",
+            runTime.constant(),
+            mesh,
+            IOobject::MUST_READ_IF_MODIFIED,
+            IOobject::NO_WRITE));
 
-    volScalarField& k = _k();
-    volScalarField& omega = _omega();
+    // Laminar viscosity [m2/s]
+    nu_.reset(new dimensionedScalar("nu", dimViscosity, transportProperties.lookup("nu")));
 
-    createTurbulenceModel();
+    // Turbulent viscosity [m2/s]
+    nut_.reset(readField<volScalarField>("nut_r", mesh));
+    U_.reset(readField<volVectorField>("U_r", mesh));
+    p_.reset(readField<volScalarField>("p_r", mesh));
 
-    const label state_size = numberOfModes_.velocity +
-        numberOfModes_.pressure +
-        numberOfModes_.k + numberOfModes_.omega;
+    phi_.reset(new surfaceScalarField(
+        IOobject("phi_r", runTime.timeName(), mesh, IOobject::NO_READ, IOobject::AUTO_WRITE),
+        linearInterpolate(U_()) & mesh.Sf()));
 
+    setRefCell(p_(), pimple().dict(), pRefCell_, pRefValue_);
     // The Rhie-Chow flux phi = phiHbyA - pEqn.flux() needs the pressure flux
-    mesh.setFluxRequired(_p().name());
-
-    const dictionary& solverDict = ITHACAdict->subOrEmptyDict("lmSolver");
-    lmSettings_.maxIterations = solverDict.getOrDefault<label>("maxIterations", lmSettings_.maxIterations);
-    lmSettings_.gradientTol = solverDict.getOrDefault<scalar>("gradientTol", lmSettings_.gradientTol);
-    lmSettings_.reductionTol = solverDict.getOrDefault<scalar>("reductionTol", lmSettings_.reductionTol);
-    lmSettings_.stepTol = solverDict.getOrDefault<scalar>("stepTol", lmSettings_.stepTol);
-    M_Assert(lmSettings_.maxIterations > 0, "lmSolver: maxIterations must be positive.");
-    M_Assert(lmSettings_.gradientTol >= 0 && lmSettings_.reductionTol >= 0 && lmSettings_.stepTol >= 0,
-        "lmSolver: the tolerances must be non-negative.");
-    Info << "### LM stopping criteria: gradientTol " << lmSettings_.gradientTol << ", reductionTol "
-         << lmSettings_.reductionTol << ", stepTol " << lmSettings_.stepTol << ", maxIterations "
-         << lmSettings_.maxIterations << endl;
-
-    const dictionary& diagDict = ITHACAdict->subOrEmptyDict("lmDiagnostics");
-    lmDiagnostics_.enabled = diagDict.getOrDefault<bool>("enabled", false);
-    lmDiagnostics_.triggers = diagDict.getOrDefault<wordList>("triggers", wordList({ "XtolTooSmall" }));
-    lmDiagnostics_.maxDumps = diagDict.getOrDefault<label>("maxDumps", 3);
-    lmDiagnostics_.steps = diagDict.getOrDefault<scalarList>("steps",
-        scalarList({ 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8 }));
-    lmDiagnostics_.coordinateScan = diagDict.getOrDefault<bool>("coordinateScan", true);
-
-    idwExponent_ = ITHACAdict->getOrDefault<scalar>("parametricDistanceExponent", 1.0);
-    idwNeighbours_ = ITHACAdict->getOrDefault<label>("maxInterpolatedSolutions", 0);
-    M_Assert(idwExponent_ > 0, "parametricDistanceExponent must be positive.");
-    Info << "### Affine reference: inverse distance weighting, exponent " << idwExponent_ << ", "
-         << (idwNeighbours_ > 0 ? std::to_string(idwNeighbours_) + " nearest runs" : std::string("all runs")).c_str()
-         << endl;
-
-    currentState_ = Eigen::VectorXd::Zero(state_size);
-    oldState_ = Eigen::VectorXd::Zero(state_size);
-    buildStateMap();
-    currentCoords_ = Eigen::VectorXd::Zero(stateMap_.size() ? stateMap_.cols() : state_size);
-
-    // Scaled coordinates y = a / rms(a_training) are O(1) for every mode and field
-    M_Assert(coefficientScale_.size() == currentCoords_.size(), "Coefficient scale size does not match the number of reduced coordinates.");
-    stateScaling_ = coefficientScale_;
-    Info << "### State scaling (RMS of the training coefficients): " << stateScaling_.transpose() << endl;
-
-    std::vector<BlockSpec> blocks {
-        { "U_r", 3 * nCells, 1.0 },
-        { "p_r", nCells, 1.0 },
-        { "k_r", nCells, 1.0 },
-        { "omega_r", nCells, 1.0 }
-    };
-    if (romSettings_.fluxResidual)
-    {
-        blocks.push_back({ "phi_r", mesh.nInternalFaces(), 1.0 });
-    }
-    residualWorkspace_ = BlockResidual { blocks };
-
-    iU_ = residualWorkspace_.index("U_r");
-    iP_ = residualWorkspace_.index("p_r");
-    iK_ = residualWorkspace_.index("k_r");
-    iOmega_ = residualWorkspace_.index("omega_r");
-    iPhi_ = romSettings_.fluxResidual ? residualWorkspace_.index("phi_r") : -1;
-    if (romSettings_.scaleResidualWithCellVolume)
-    {
-        const Eigen::VectorXd wScalar = Foam2Eigen::field2Eigen(mesh.V().field()).cwiseSqrt().cwiseInverse();
-        vectorField wVecField(nCells);
-        forAll(wVecField, celli)
-        {
-            const scalar w = 1.0 / Foam::sqrt(mesh.V()[celli]);
-            wVecField[celli] = vector(w, w, w);
-        }
-        const Eigen::VectorXd wVector = Foam2Eigen::field2Eigen(wVecField);
-
-        residualWorkspace_.setBlockRowWeights(iU_, wVector);
-        residualWorkspace_.setBlockRowWeights(iP_, wScalar);
-        residualWorkspace_.setBlockRowWeights(iK_, wScalar);
-        residualWorkspace_.setBlockRowWeights(iOmega_, wScalar);
-
-        if (iPhi_ >= 0)
-        {
-            // The flux residual is in m3/s: divided by |Sf| it is a normal velocity, then weighted by the
-            // square root of the face volume |Sf| |d|, as the cell blocks are weighted by sqrt(V)
-            const scalarField& magSf = mesh.magSf().primitiveField();
-            const surfaceVectorField delta(mesh.delta());
-            Eigen::VectorXd wPhi(mesh.nInternalFaces());
-            for (label facei = 0; facei < mesh.nInternalFaces(); facei++)
-            {
-                wPhi(facei) = Foam::sqrt(magSf[facei] * mag(delta[facei])) / magSf[facei];
-            }
-            residualWorkspace_.setBlockRowWeights(iPhi_, wPhi);
-        }
-    }
-
-    if (romSettings_.residualPreconditioner == "jacobi")
-    {
-        // Each preconditioned block is an increment of its unknown: normalise by the field scale.
-        // The phi block, through its row weights, is a normal velocity
-        residualWorkspace_.setBlockWeight(iU_, 1.0 / fieldScale_(0));
-        residualWorkspace_.setBlockWeight(iP_, 1.0 / fieldScale_(1));
-        residualWorkspace_.setBlockWeight(iK_, 1.0 / fieldScale_(2));
-        residualWorkspace_.setBlockWeight(iOmega_, 1.0 / fieldScale_(3));
-        if (iPhi_ >= 0)
-        {
-            residualWorkspace_.setBlockWeight(iPhi_, 1.0 / fieldScale_(0));
-        }
-        Info << "### Jacobi-preconditioned residual, field scales (U p k omega): " << fieldScale_.transpose() << endl;
-    }
+    mesh.setFluxRequired(p_().name());
 }
 
-void ReducedLSPGUnsteadyNSTurb::captureFOMData(
-    const LSPGUnsteadyNSTurb& problem)
+
+void ReducedLSPGUnsteadyNSTurb::createTurbulenceModel(const LSPGUnsteadyNSTurb& problem)
 {
-    interpolationSettings_ = InterpolationSettings {
-        problem.ITHACAdict->lookupOrDefault<int>("firstRBFIndex", 0),
-        problem.ITHACAdict->lookupOrDefault<bool>("derivativeInRBF", false),
-        problem.ITHACAdict->lookupOrDefault<label>("dimInputRBF", 0),
-    };
-
-    numberOfModes_ = NumberOfModes {
-        problem.ITHACAdict->lookupOrDefault<label>("NmodesUproj", 0),
-        problem.ITHACAdict->lookupOrDefault<label>("NmodesPproj", 0),
-        problem.ITHACAdict->lookupOrDefault<label>("NmodesKproj", 0),
-        problem.ITHACAdict->lookupOrDefault<label>("NmodesOmegaproj", 0),
-    };
-    M_Assert(numberOfModes_.velocity > 0, "Number of velocity modes must be greater than zero.");
-    M_Assert(numberOfModes_.pressure > 0, "Number of pressure modes must be greater than zero.");
-    M_Assert(numberOfModes_.k > 0, "Number of k modes must be greater than zero.");
-    M_Assert(numberOfModes_.omega > 0, "Number of omega modes must be greater than zero.");
-
-    mu_ = problem.mu;
-    rbfSplines_ = problem.rbfSplines;
-
-    // I don't think here we are actually safe from deleting the FOM, check later
-    Umodes_ = problem.Umodes;
-    M_Assert(Umodes_.size() == numberOfModes_.velocity, "Number of velocity modes does not match the size of the velocity modes matrix.");
-    Phimodes_ = problem.Phimodes;
-    M_Assert(Phimodes_.size() == numberOfModes_.velocity, "Number of velocity modes does not match the size of the face flux modes matrix.");
-    Pmodes_ = problem.Pmodes;
-    M_Assert(Pmodes_.size() == numberOfModes_.pressure, "Number of pressure modes does not match the size of the pressure modes matrix.");
-    kModes_ = problem.kmodes;
-    Info << "Number of k modes: " << kModes_.size() << nl;
-    Info << "Requested number of k modes: " << numberOfModes_.k << nl;
-    M_Assert(kModes_.size() == numberOfModes_.k, "Number of k modes does not match the size of the k modes matrix.");
-    omegaModes_ = problem.omegamodes;
-    M_Assert(omegaModes_.size() == numberOfModes_.omega, "Number of omega modes does not match the size of the omega modes matrix.");
-    // Nutmodes_ = problem.nutmodes;
-    // M_Assert(Nutmodes_.size() == numberOfModes_.nut, "Number of nut modes does not match the size of the nut modes matrix.");
-
-    liftFields_ = problem.liftfield;
-    liftFieldsPhi_ = problem.liftfieldphi;
-
-    // PtrLists containing the initial condition of each offline trajectory.
-    U0field_ = problem.U0field;
-    Phi0field_ = problem.Phi0field;
-    P0field_ = problem.P0field;
-    // Nut0field_ = problem.Nut0field;
-    k0field_ = problem.k0field;
-    omega0field_ = problem.omega0field;
-
-    // nutFields_ = problem.fluctNutfield;
-    // avgNutFields_ = problem.avgNutfield;
-
-    inletIndex_ = problem.inletIndex;
-
-    // Stacked POD: the fields of jointPOD share their coefficients
-    const wordList fieldNames({ "U", "p", "k", "omega" });
-    forAll(fieldNames, f)
-    {
-        jointField_[f] = problem.jointPOD.found(fieldNames[f]);
-    }
-    jointWeights_ = problem.jointPODWeights;
-
-    // RMS of the training values of each reduced coordinate, used to scale the reduced state.
-    // Computed on the unnormalised snapshots, i.e. on the coefficients the ROM actually sees.
-
-    // This const_cast is quite ugly, but is needed since getCoeffs accepts a non-const PtrList, and we don't want to copy the snapshots.
-    LSPGUnsteadyNSTurb& fom = const_cast<LSPGUnsteadyNSTurb&>(problem);
-    PtrList<volVectorField>& Usnapshots = (romSettings_.bcMethod == "lift") ? fom.Uomfield : fom.Ufield;
-    std::vector<Eigen::VectorXd> scales;
-    if (problem.jointPOD.size())
-    {
-        List<Eigen::MatrixXd> snapshots(4);
-        snapshots[0] = Foam2Eigen::PtrList2Eigen(Usnapshots);
-        if (jointField_[1])
-            snapshots[1] = Foam2Eigen::PtrList2Eigen(fom.Pfield);
-        if (jointField_[2])
-            snapshots[2] = Foam2Eigen::PtrList2Eigen(fom.kfield);
-        if (jointField_[3])
-            snapshots[3] = Foam2Eigen::PtrList2Eigen(fom.omegafield);
-        scales.push_back(rowRMS(jointCoefficients(snapshots)));
-    }
-    if (!jointField_[0])
-        scales.push_back(coefficientRMS(Usnapshots, Umodes_));
-    if (!jointField_[1])
-        scales.push_back(coefficientRMS(fom.Pfield, Pmodes_));
-    if (!jointField_[2])
-        scales.push_back(coefficientRMS(fom.kfield, kModes_));
-    if (!jointField_[3])
-        scales.push_back(coefficientRMS(fom.omegafield, omegaModes_));
-    label nCoords = 0;
-    for (const Eigen::VectorXd& s : scales)
-    {
-        nCoords += s.size();
-    }
-    coefficientScale_.resize(nCoords);
-    nCoords = 0;
-    for (const Eigen::VectorXd& s : scales)
-    {
-        coefficientScale_.segment(nCoords, s.size()) = s;
-        nCoords += s.size();
-    }
-
-    // Field scales of the preconditioned residual: RMS over the snapshots of the volume-weighted L2 norm
-    fieldScale_.resize(4);
-    fieldScale_ << fieldRMS(Usnapshots), fieldRMS(fom.Pfield), fieldRMS(fom.kfield), fieldRMS(fom.omegafield);
-    const scalarList userScales = problem.ITHACAdict->lookupOrDefault<scalarList>("preconditionerScales", scalarList());
-    if (userScales.size())
-    {
-        M_Assert(userScales.size() == 4, "preconditionerScales must have 4 entries: (U p k omega).");
-        for (label i = 0; i < 4; i++)
-        {
-            fieldScale_(i) = userScales[i];
-        }
-    }
-    M_Assert(fieldScale_.minCoeff() > 0, "The preconditioner field scales must be positive.");
-}
-
-void ReducedLSPGUnsteadyNSTurb::createTurbulenceModel()
-{
-    const dictionary* turbDictPtr = nullptr;
     fvMesh& mesh = this->mesh();
-
+    const dictionary* turbDictPtr = nullptr;
     autoPtr<IOdictionary> localDict;
 
     for (const word& name : { word("momentumTransport"), word("turbulenceProperties") })
@@ -363,20 +235,21 @@ void ReducedLSPGUnsteadyNSTurb::createTurbulenceModel()
                                : rasDict.get<word>("RASModel");
 
     ITHACATurbulenceModels::ResidualEddyViscosityTurbulenceModel::SharedFields shared {
-        *_nu, *_nut, *_U, *_phi
+        nu_(), nut_(), U_(), phi_()
     };
 
     if (modelType == "kOmegaSST")
     {
-        turbulence.reset(
+        // The transported fields of the closure, read from the case start time
+        turbulenceFields_.push_back(readField<volScalarField>("k_r", mesh));
+        turbulenceFields_.push_back(readField<volScalarField>("omega_r", mesh));
+        turbulence_.reset(
             new ITHACATurbulenceModels::ResidualAssemblerSST(
                 mesh,
                 mesh.time(),
                 shared,
-                kModes_,
-                omegaModes_,
-                k0field_,
-                omega0field_,
+                problem.k0field,
+                problem.omega0field,
                 rasDict.optionalSubDict("kOmegaSSTCoeffs"),
                 ITHACAdict->lookupOrDefault<scalar>("turbulenceBoundFactor", 0.1)));
     } else
@@ -385,372 +258,409 @@ void ReducedLSPGUnsteadyNSTurb::createTurbulenceModel()
             << "Unsupported RAS model " << modelType
             << ". Available: kOmegaSST" << exit(FatalError);
     }
+
+    const wordList& transported = turbulence_->transportedFields();
+    M_Assert(transported.size() == turbulenceFields_.size(), "The closure transports fields that were not created.");
+    forAll(transported, i)
+    {
+        M_Assert(transported[i] == turbulenceFields_[i].name(), "The fields of the closure are not in the expected order.");
+    }
 }
+
+
+ReducedLSPGUnsteadyNSTurb::TrainingStatistics ReducedLSPGUnsteadyNSTurb::createReducedFields(
+    const LSPGUnsteadyNSTurb& problem)
+{
+    const AffineReferenceType reference = affine_.type();
+    const bool lift = reference == AffineReferenceType::Lift;
+    const bool initialConditions = reference == AffineReferenceType::InitialCondition;
+    M_Assert(problem.jointPOD.empty() || problem.jointPOD.found("U"), "The stacked POD (jointPOD) must contain U.");
+
+    LSPGUnsteadyNSTurb& fom = const_cast<LSPGUnsteadyNSTurb&>(problem); // Remove the constness 
+    const PtrList<volVectorField> noVector;
+    const PtrList<volScalarField> noScalar;
+    const PtrList<surfaceScalarField> noSurface;
+
+    // Statistics computed on the unnormalised snapshots, i.e. on the coefficients the ROM actually sees
+    TrainingStatistics stats;
+
+    auto addField = [&](auto* field, auto& snapshots) {
+        fields_.append(field);
+        stats.fieldRMS.push_back(fieldRMS(snapshots));
+        if (field->joint())
+        {
+            stats.jointProjections.push_back(ITHACAutilities::getMassMatrix(field->modes(), snapshots));
+        } else
+        {
+            stats.segregatedRMS.push_back(coefficientRMS(snapshots, field->modes()));
+        }
+    };
+    auto checkModes = [&](const label available, const word& name) {
+        M_Assert(available == requestedModes(*ITHACAdict, name),
+            ("Number of " + name + " modes does not match the size of the " + name + " modes.").c_str());
+    };
+
+    checkModes(problem.Umodes.size(), "U");
+    addField(new volVectorReducedField(
+                 "U", U_(), problem.Umodes,
+                 lift ? problem.liftfield : initialConditions ? problem.U0field
+                                                              : noVector,
+                 fields_.stateSize(), problem.jointPOD.found("U")),
+        lift ? fom.Uomfield : fom.Ufield);
+
+    // The face flux shares the coefficients of the velocity
+    M_Assert(problem.Phimodes.size() == problem.Umodes.size(),
+        "Number of velocity modes does not match the size of the face flux modes matrix.");
+    phiField_.reset(new surfaceScalarReducedField(
+        "phi", phi_(), problem.Phimodes,
+        lift ? problem.liftfieldphi : initialConditions ? problem.Phi0field
+                                                        : noSurface,
+        fields_[0].offset(), false));
+
+    // No BC correction at reconstruction: the pressure BCs are corrected after the affine reference is added
+    checkModes(problem.Pmodes.size(), "p");
+    addField(new volScalarReducedField(
+                 "p", p_(), problem.Pmodes, initialConditions ? problem.P0field : noScalar,
+                 fields_.stateSize(), problem.jointPOD.found("p"), false),
+        fom.Pfield);
+
+    forAll(turbulenceFields_, i)
+    {
+        const word name = reducedName(turbulenceFields_[i].name());
+        const OfflineFieldData<scalar> data = turbulenceData(fom, name, initialConditions);
+        checkModes(data.modes.size(), name);
+        addField(new volScalarReducedField(
+                     name, turbulenceFields_[i], data.modes, data.references,
+                     fields_.stateSize(), problem.jointPOD.found(name)),
+            data.snapshots);
+    }
+
+    for (label f = 0; f < fields_.size(); f++)
+    {
+        referencedFields_.push_back(&fields_[f]);
+    }
+    referencedFields_.push_back(phiField_.get());
+
+    return stats;
+}
+
+
+void ReducedLSPGUnsteadyNSTurb::createStateMap(const LSPGUnsteadyNSTurb& problem)
+{
+    // Stacked POD: the joint fields share one set of coefficients, the reduced coordinates
+    stateMap_ = StateMap(fields_);
+    if (!problem.jointPOD.empty())
+    {
+        Eigen::VectorXd weights = Eigen::VectorXd::Zero(fields_.size());
+        for (label f = 0; f < fields_.size(); f++)
+        {
+            const label w = jointWeightIndex(fields_[f].name());
+            weights(f) = fields_[f].joint() && w >= 0 ? problem.jointPODWeights(w) : 0.0;
+        }
+        joint_.reset(new JointProjector(fields_, weights));
+    }
+
+    currentState_ = Eigen::VectorXd::Zero(fields_.stateSize());
+    currentCoords_ = Eigen::VectorXd::Zero(stateMap_.nCoordinates(fields_.stateSize()));
+}
+
+
+void ReducedLSPGUnsteadyNSTurb::setStateScaling(const TrainingStatistics& stats)
+{
+    // Same order as the reduced coordinates (StateMap): the shared coefficients, then the other fields
+    std::vector<Eigen::VectorXd> scales;
+    if (joint_)
+    {
+        scales.push_back(rowRMS(joint_->solve(stats.jointProjections)));
+    }
+    scales.insert(scales.end(), stats.segregatedRMS.begin(), stats.segregatedRMS.end());
+
+    // Scaled coordinates y = c / rms(c_training) are O(1) for every mode and field
+    stateScaling_ = concatenate(scales);
+    M_Assert(stateScaling_.size() == currentCoords_.size(),
+        "Coefficient scale size does not match the number of reduced coordinates.");
+    Info << "### State scaling (RMS of the training coefficients): " << stateScaling_.transpose() << endl;
+}
+
+
+void ReducedLSPGUnsteadyNSTurb::setFieldScales(const TrainingStatistics& stats)
+{
+    // Field scales of the preconditioned residual: RMS over the snapshots of the volume-weighted L2 norm
+    fieldScale_ = Eigen::Map<const Eigen::VectorXd>(stats.fieldRMS.cdata(), stats.fieldRMS.size());
+    const scalarList userScales = ITHACAdict->lookupOrDefault<scalarList>("preconditionerScales", scalarList());
+    if (userScales.size())
+    {
+        M_Assert(userScales.size() == fields_.size(),
+            "preconditionerScales must have one entry per reduced field: (U p k omega).");
+        forAll(userScales, i)
+        {
+            fieldScale_(i) = userScales[i];
+        }
+    }
+    M_Assert(fieldScale_.minCoeff() > 0, "The preconditioner field scales must be positive.");
+}
+
+
+void ReducedLSPGUnsteadyNSTurb::createResidual()
+{
+    const fvMesh& mesh = this->mesh();
+    std::vector<BlockSpec> blocks {
+        { "U", 3 * nCells, 1.0 },
+        { "p", nCells, 1.0 }
+    };
+    for (label f = 2; f < fields_.size(); f++)
+    {
+        blocks.push_back({ fields_[f].name(), nCells, 1.0 });
+    }
+    if (fluxResidual_)
+    {
+        blocks.push_back({ "phi", mesh.nInternalFaces(), 1.0 });
+    }
+    residual_ = BlockResidual { blocks };
+
+    // Block of each field of fields_, in order
+    labelList fieldBlocks(fields_.size());
+    forAll(fieldBlocks, f)
+    {
+        fieldBlocks[f] = residual_.index(fields_[f].name());
+    }
+    iU_ = fieldBlocks[0];
+    iP_ = fieldBlocks[1];
+    iTurbulence_ = labelList(SubList<label>(fieldBlocks, fields_.size() - 2, 2));
+    iPhi_ = fluxResidual_ ? residual_.index("phi") : -1;
+
+    if (romSettings_.scaleResidualWithCellVolume)
+    {
+        setCellVolumeRowWeights(iU_, 3);
+        for (label f = 1; f < fields_.size(); f++)
+        {
+            setCellVolumeRowWeights(fieldBlocks[f], 1);
+        }
+
+        if (iPhi_ >= 0)
+        {
+            // The flux residual is in m3/s: divided by |Sf| it is a normal velocity, then weighted by the
+            // square root of the face volume |Sf| |d|, as the cell blocks are weighted by sqrt(V)
+            const scalarField& magSf = mesh.magSf().primitiveField();
+            const surfaceVectorField delta(mesh.delta());
+            Eigen::VectorXd wPhi(mesh.nInternalFaces());
+            for (label facei = 0; facei < mesh.nInternalFaces(); facei++)
+            {
+                wPhi(facei) = Foam::sqrt(magSf[facei] * mag(delta[facei])) / magSf[facei];
+            }
+            residual_.setBlockRowWeights(iPhi_, wPhi);
+        }
+    }
+
+    if (romSettings_.residualPreconditioner == ResidualPreconditionerType::Jacobi)
+    {
+        forAll(fieldBlocks, f)
+        {
+            residual_.setBlockWeight(fieldBlocks[f], 1.0 / fieldScale_(f));
+        }
+        if (iPhi_ >= 0)
+        {
+            residual_.setBlockWeight(iPhi_, 1.0 / fieldScale_(0));
+        }
+        Info << "### Jacobi-preconditioned residual, field scales (" << fields_.names() << "): "
+             << fieldScale_.transpose() << endl;
+    }
+
+    // Logs and residualBlockWeights: every field block, then phi (0 without fluxResidual)
+    labelList reported(fieldBlocks);
+    reported.push_back(iPhi_);
+    wordList names(fields_.names());
+    names.push_back("phi");
+    setReportedBlocks(reported, names);
+}
+
 
 void ReducedLSPGUnsteadyNSTurb::solveOnline(const word& bcROM, const word& folder)
 {
-    if (Pstream::master())
-    {
-        mkDir(folder);
-        ITHACAutilities::createSymLink(folder);
-    }
     resetToInitialCondition();
     boundaryConditions_ = BoundaryConditions { bcROM, "linear" };
-    nDiagnosticDumps_ = 0;
-    // Residual fields go to the ROM case folder (folder/0 is a link to the case 0 directory)
-    residualOutputFolder_ = folder;
-    Time& runTime = this->runTime();
-    fvMesh& mesh = this->mesh();
-
-#include "readTimeControls.H"
-#include "initContinuityErrs.H"
-
-    initializePODCoeffsFromFields();
-    updatePreconditioner_ = true;
-    assembleResidual(currentState_, true, true);
-
-    Info << "\nInitial residual norm: " << residualWorkspace_.vector().norm() << nl
-         << "  - U residual norm " << residualWorkspace_.blockNorm(iU_) << nl
-         << "  - p residual norm " << residualWorkspace_.blockNorm(iP_) << nl
-         << "  - k residual norm " << residualWorkspace_.blockNorm(iK_) << nl
-         << "  - omega residual norm " << residualWorkspace_.blockNorm(iOmega_) << nl
-         << "  - phi residual norm " << phiBlockNorm() << nl << endl;
-    if (romSettings_.residualPreconditioner == "none")
-    {
-        residualWorkspace_.calibrateWeights(1e-4);
-    }
-
-    // Per-step residual history, for post-processing (e.g. the consistency test)
-    std::ofstream residualLog;
-    if (Pstream::master())
-    {
-        residualLog.open(folder + "/residualHistory.dat");
-        residualLog << std::scientific << std::setprecision(8)
-                    << "# deltaT " << runTime.deltaTValue() << nl
-                    << "# block weights (U p k omega phi): " << residualBlockWeights().transpose() << nl
-                    << "# gradientCosine: max_j |J_j^T r| / (|J_j| |r|) at the last Jacobian evaluation" << nl
-                    << "# time initialTotal finalTotal U p k omega phi lmIterations nfev gradientCosine status" << std::endl;
-    }
-
-    // The functor provides its own finite-difference Jacobian (LevenbergMarquardtFunctor::df)
-    LevenbergMarquardtFunctor lmFunctor(this, currentCoords_.size(), residualWorkspace_.size());
-    Eigen::LevenbergMarquardt<LevenbergMarquardtFunctor> lm(lmFunctor);
-
-    lm.parameters.ftol = lmSettings_.reductionTol;
-    lm.parameters.xtol = lmSettings_.stepTol;
-    lm.parameters.gtol = lmSettings_.gradientTol;
-    lm.parameters.maxfev = currentCoords_.size() * 500;
-
-    // Own write schedule: Time::setTime() does not reset the write index of runTime, so after an
-    // offline run up to endTime, runTime.writeTime() would never fire again from t = 0
-    const scalar writeInterval = runTime.controlDict().get<scalar>("writeInterval");
-    scalar nextWrite = runTime.value() + writeInterval;
-
-    auto start = std::chrono::high_resolution_clock::now();
-    while (runTime.run())
-    {
-        runTime++;
-        Info << "Time = " << runTime.time().value() << nl;
-        boundaryConditions_.updateTimeDependentBC(runTime.time().value());
-
-        Eigen::VectorXd scaledState = currentCoords_.cwiseQuotient(stateScaling_);
-        // minimizeInit evaluates the residual at the initial guess: the preconditioner is built there
-        updatePreconditioner_ = true;
-        Eigen::LevenbergMarquardtSpace::Status status = lm.minimizeInit(scaledState);
-        const double initialResidualNorm = residualWorkspace_.vector().norm();
-        int lmIterations = 0;
-
-        // Every stop other than Running is decided inside LM: gtol (stationarity, checked on the Jacobian at
-        // the current point before stepping), ftol (reduction) or xtol (trust region), or a failure status
-        while ((status == Eigen::LevenbergMarquardtSpace::NotStarted || status == Eigen::LevenbergMarquardtSpace::Running)
-            && lmIterations < lmSettings_.maxIterations)
-        {
-            status = lm.minimizeOneStep(scaledState);
-            lmIterations++;
-        }
-        if (status == Eigen::LevenbergMarquardtSpace::Running)
-        {
-            Info << "LM reached maximum iterations (" << lmSettings_.maxIterations << ") without converging." << nl;
-        }
-        Info << "LM stopped after " << lmIterations << " iterations (status = " << lmStatusToString(status)
-             << ", gradient cosine = " << lm.gnorm << ")" << nl;
-
-        if (lmDiagnosticsTriggered(lmStatusToString(status)))
-        {
-            runLMDiagnostics(lmFunctor, scaledState, lmStatusToString(status), folder);
-        }
-
-        currentCoords_ = scaledState.cwiseProduct(stateScaling_);
-        currentState_ = fullState(scaledState);
-        // Final assembly at the converged state; optionally writes the residual fields in folder/<time>
-        assembleResidual(currentState_, true, romSettings_.writeResidualFields);
-
-        volScalarField contErr(fvc::div(_phi()));
-        scalar sumLocalContErr = runTime.deltaTValue() *
-            mag(contErr)().weightedAverage(mesh.V()).value();
-        scalar globalContErr = runTime.deltaTValue() *
-            contErr.weightedAverage(mesh.V()).value();
-        cumulativeContErr += globalContErr;
-
-        Info << "  - U residual norm " << residualWorkspace_.blockNorm(iU_) << nl
-             << "  - p residual norm " << residualWorkspace_.blockNorm(iP_) << nl
-             << "  - k residual norm " << residualWorkspace_.blockNorm(iK_) << nl
-             << "  - omega residual norm " << residualWorkspace_.blockNorm(iOmega_) << nl
-             << "  - phi residual norm " << phiBlockNorm() << nl
-             << "  - Initial residual norm: " << initialResidualNorm << nl
-             << "  - Final residual norm: " << residualWorkspace_.vector().norm() << nl
-             << "  - time step continuity errors : sum local = " << sumLocalContErr
-             << "  |  global = " << globalContErr
-             << "  |  cumulative = " << cumulativeContErr << nl
-             << "  - Function evaluations: " << lm.nfev << endl;
-
-        if (Pstream::master())
-        {
-            residualLog << runTime.value() << " " << initialResidualNorm << " "
-                        << residualWorkspace_.vector().norm() << " "
-                        << residualWorkspace_.blockNorm(iU_) << " "
-                        << residualWorkspace_.blockNorm(iP_) << " "
-                        << residualWorkspace_.blockNorm(iK_) << " "
-                        << residualWorkspace_.blockNorm(iOmega_) << " "
-                        << phiBlockNorm() << " "
-                        << lmIterations << " " << lm.nfev << " " << lm.gnorm << " "
-                        << lmStatusToString(status) << std::endl;
-        }
-
-        // oldState_ = currentState_;
-
-        if (runTime.value() >= nextWrite - 0.5 * runTime.deltaTValue())
-        {
-            ITHACAstream::exportSolution(_U(), name(runTime.time().value()), folder);
-            ITHACAstream::exportSolution(_p(), name(runTime.time().value()), folder);
-            turbulence->saveFieldsToDisk(runTime, folder);
-            nextWrite += writeInterval;
-        }
-    }
-    residualOutputFolder_ = "";
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    Info << "Total computation time: " << duration.count() << " ms" << endl;
+    lmDiagnostics_->reset();
+    cumulativeContErr_ = 0;
+    runOnline(folder);
 }
+
+
+void ReducedLSPGUnsteadyNSTurb::updateBoundaryConditions(const scalar time)
+{
+    boundaryConditions_.updateTimeDependentBC(time);
+}
+
+
+void ReducedLSPGUnsteadyNSTurb::timeStepCompleted()
+{
+    const Time& runTime = this->runTime();
+    const volScalarField contErr(fvc::div(phi_()));
+    const scalar sumLocalContErr = runTime.deltaTValue() *
+        mag(contErr)().weightedAverage(mesh().V()).value();
+    const scalar globalContErr = runTime.deltaTValue() *
+        contErr.weightedAverage(mesh().V()).value();
+    cumulativeContErr_ += globalContErr;
+
+    Info << "  - time step continuity errors : sum local = " << sumLocalContErr
+         << "  |  global = " << globalContErr
+         << "  |  cumulative = " << cumulativeContErr_ << nl;
+}
+
+
+void ReducedLSPGUnsteadyNSTurb::writeFields(const word& folder) const
+{
+    fields_.write(name(runTime().time().value()), folder);
+}
+
+
+void ReducedLSPGUnsteadyNSTurb::diagnoseSolve(
+    const LevenbergMarquardtFunctor& functor,
+    const Eigen::VectorXd& y,
+    const std::string& status,
+    const word& folder)
+{
+    if (lmDiagnostics_->triggered(status))
+    {
+        lmDiagnostics_->run(functor, y, status, folder, runTime().value());
+    }
+}
+
 
 Eigen::VectorXd ReducedLSPGUnsteadyNSTurb::assembleResidual(
     const Eigen::VectorXd& state,
     const bool correctBCs,
     const bool writeResidual)
 {
-#include "createReferences.H"
-
-    reconstructReducedFields(state, U, p, phi, correctBCs); // Carries out the linear combination
-    turbulence->correctNut();
-    // interpolateNutCoeffs(nut, Nutmodes_, state); // Nut coefficients are interpolated using an RBF from the velocity coefficients, then the field is reconstructed using the modes
-
+    reconstructFields(state, correctBCs);
+    turbulence_->correctNut();
     return residualWithCurrentFields(writeResidual);
 }
 
-PressureResidualCheck::Terms ReducedLSPGUnsteadyNSTurb::pressureResidualTerms()
-{
-#include "createReferences.H"
-#include "UEqn.H"
-    return PressureResidualCheck::compute(UEqn, U, p, phi, MRF, _pRefCell, _pRefValue);
-}
 
 Eigen::VectorXd ReducedLSPGUnsteadyNSTurb::residualWithCurrentFields(const bool writeResidual)
 {
-#include "createReferences.H"
+    volVectorField& U = U_();
+    volScalarField& p = p_();
+    surfaceScalarField& phi = phi_();
 
-    // interpolateNutCoeffs(nut, Nutmodes_, state); // Nut coefficients are interpolated using an RBF from the velocity coefficients, then the field is reconstructed using the modes
-#include "UEqn.H"
-#include "pEqn.H"
+    tmp<fvVectorMatrix> tUEqn = IncompressibleNSEquations::momentum(U, phi, MRF(), fvOptions(), turbulence_());
+    fvVectorMatrix& UEqn = tUEqn.ref();
+    const IncompressibleNSEquations::PressureSystem ps(UEqn, U, p, phi, MRF(), pRefCell_, pRefValue_);
+    p.correctBoundaryConditions();
 
-    const Field<scalar> Rp = pEqn.residual();
+    collector_.begin(writeResidual);
+
+    const scalarField Rp(ps.pEqn().residual());
+    collector_.add(iP_, ps.pEqn(), Rp);
 
     // Face-flux residual (He et al. 2021, eq. 1.8): the reconstructed flux against the Rhie-Chow flux
     // of the current (U, p). Assembled only, from the same UEqn and pEqn
     if (iPhi_ >= 0)
     {
-        const surfaceScalarField phiRC(phiHbyA - pEqn.flux());
-        const Field<scalar> Rphi(phi.primitiveField() - phiRC.primitiveField());
-        residualWorkspace_.set(iPhi_, Foam2Eigen::field2Eigen(Rphi));
-        if (writeResidual)
-        {
-            surfaceScalarField res("residual_phi", (phi - phiRC) / mesh.magSf());
-            exportResidual(res);
-        }
+        const surfaceScalarField phiRC(ps.flux());
+        collector_.add(iPhi_, surfaceScalarField("Rphi", phi - phiRC));
     }
 
     UEqn += fvc::grad(p);
-    const Field<vector> Ru = UEqn.residual();
+    const vectorField Ru(UEqn.residual());
+    collector_.add(iU_, UEqn, Ru);
 
-    PtrList<fvScalarMatrix> turbEqs = turbulence->assembleEquations(fvOptions);
-    const Field<scalar> Rk = turbEqs[0].residual();
-    const Field<scalar> Romega = turbEqs[1].residual();
-
-    if (writeResidual)
+    PtrList<fvScalarMatrix> turbEqs = turbulence_->assembleEquations(fvOptions());
+    forAll(turbEqs, i)
     {
-        writeResidualField<vector>("residual_U", UEqn, Ru, mesh);
-        writeResidualField<scalar>("residual_p", pEqn, Rp, mesh);
-        writeResidualField<scalar>("residual_k", turbEqs[0], Rk, mesh);
-        writeResidualField<scalar>("residual_omega", turbEqs[1], Romega, mesh);
+        const scalarField R(turbEqs[i].residual());
+        collector_.add(iTurbulence_[i], turbEqs[i], R);
     }
 
-    if (romSettings_.residualPreconditioner == "jacobi" && updatePreconditioner_)
-    {
-        setJacobiPreconditioner(UEqn, pEqn, turbEqs);
-        updatePreconditioner_ = false;
-    }
-
-    residualWorkspace_.set(iU_, Foam2Eigen::field2Eigen(Ru));
-    residualWorkspace_.set(iP_, Foam2Eigen::field2Eigen(Rp));
-    residualWorkspace_.set(iK_, Foam2Eigen::field2Eigen(Rk));
-    residualWorkspace_.set(iOmega_, Foam2Eigen::field2Eigen(Romega));
-
-    return residualWorkspace_.vector();
+    collector_.end();
+    return residual_.vector();
 }
 
-void ReducedLSPGUnsteadyNSTurb::setJacobiPreconditioner(
-    const fvVectorMatrix& UEqn,
-    const fvScalarMatrix& pEqn,
-    const PtrList<fvScalarMatrix>& turbEqs)
-{
-    const scalarField& V = mesh().V().field();
-    auto rowWeights = [&](const scalarField& A) -> Eigen::VectorXd {
-        Eigen::VectorXd w(A.size());
-        forAll(A, celli)
-        {
-            const scalar a = max(mag(A[celli]) * V[celli], VSMALL);
-            w(celli) = Foam::sqrt(V[celli]) / a;
-        }
-        return w;
-    };
 
-    const Eigen::VectorXd wU = rowWeights(UEqn.A()().primitiveField());
-    Eigen::VectorXd wUvec(3 * wU.size());
-    for (label celli = 0; celli < wU.size(); celli++)
-    {
-        wUvec.segment(3 * celli, 3).setConstant(wU(celli));
-    }
-    residualWorkspace_.setBlockRowWeights(iU_, wUvec);
-    residualWorkspace_.setBlockRowWeights(iP_, rowWeights(pEqn.A()().primitiveField()));
-    residualWorkspace_.setBlockRowWeights(iK_, rowWeights(turbEqs[0].A()().primitiveField()));
-    residualWorkspace_.setBlockRowWeights(iOmega_, rowWeights(turbEqs[1].A()().primitiveField()));
+PressureResidualCheck::Terms ReducedLSPGUnsteadyNSTurb::pressureResidualTerms()
+{
+    tmp<fvVectorMatrix> tUEqn = IncompressibleNSEquations::momentum(U_(), phi_(), MRF(), fvOptions(), turbulence_());
+    return PressureResidualCheck::compute(tUEqn(), U_(), p_(), phi_(), MRF(), pRefCell_, pRefValue_);
 }
 
-double ReducedLSPGUnsteadyNSTurb::phiBlockNorm() const
+
+void ReducedLSPGUnsteadyNSTurb::reconstructFields(const Eigen::VectorXd& state, const bool correctBCs)
 {
-    return iPhi_ >= 0 ? residualWorkspace_.blockNorm(iPhi_) : 0.0;
-}
+    fields_.reconstruct(state);
+    phiField_->reconstruct(state);
 
-void ReducedLSPGUnsteadyNSTurb::reconstructReducedFields(
-    const Eigen::VectorXd& state,
-    volVectorField& velocity_field,
-    volScalarField& pressure_field,
-    surfaceScalarField& phi_field,
-    bool correctBCs)
-{
-    Umodes_.reconstructInPlace(velocity_field, state.head(numberOfModes_.velocity), "U_r");
-    Phimodes_.reconstructInPlace(phi_field, state.head(numberOfModes_.velocity), "phi_r");
-    // No BC correction here: the pressure BCs are corrected below, after the offset fields are added
-    Pmodes_.reconstructInPlace(pressure_field, state.segment(numberOfModes_.velocity, numberOfModes_.pressure), "p_r", false);
-    turbulence->reconstructTurbulenceFields(state.tail(numberOfModes_.k + numberOfModes_.omega));
-
-    if (romSettings_.bcMethod == "lift")
+    updateAffineReference();
+    for (ReducedFieldBase& f : referencedFields_)
     {
-        const Eigen::VectorXd& bcs = boundaryConditions_.getCurrentBCs();
-        for (label i = 0; i < inletIndex_.rows(); ++i)
-        {
-            const label patchID = inletIndex_(i, 0);
-            const label cmpt = inletIndex_(i, 1);
-            vector velBC = { 0.0, 0.0, 0.0 };
-            velBC[cmpt] = bcs(i);
-            ITHACAutilities::assignBC(velocity_field, patchID, velBC);
-            velocity_field += liftFields_[i] * bcs(i);
-            phi_field += liftFieldsPhi_[i] * bcs(i);
-        }
-    } else if (romSettings_.snapshotCollectionMethod == 1) // Consistent method by carlberg, snapshots are centered to their initial condition for the offline trajectories
-    {
-        const Eigen::VectorXd& bcs = boundaryConditions_.getCurrentBCs();
-        const Eigen::VectorXd weights = interpolateIDW(bcs);
-        for (int k = 0; k < weights.size(); k++)
-        {
-            velocity_field += weights(k) * U0field_[k];
-            phi_field += weights(k) * Phi0field_[k];
-            pressure_field += weights(k) * P0field_[k];
-        }
-        turbulence->addInitialZeroField(weights);
-
-        for (label i = 0; i < inletIndex_.rows(); ++i)
-        {
-            const label patchID = inletIndex_(i, 0);
-            const label cmpt = inletIndex_(i, 1);
-            vector velBC = { 0.0, 0.0, 0.0 };
-            velBC[cmpt] = bcs(i);
-            ITHACAutilities::assignBC(velocity_field, patchID, velBC);
-            phi_field.boundaryFieldRef()[patchID] = velocity_field.boundaryField()[patchID] & velocity_field.mesh().Sf().boundaryField()[patchID];
-        }
+        f.addReference();
     }
+    imposeInletConditions();
+
     if (correctBCs)
     {
-        pressure_field.correctBoundaryConditions();
+        p_().correctBoundaryConditions();
     }
 
-    turbulence->boundTurbulenceFields();
+    turbulence_->constrainTransportedFields();
 }
+
+
+void ReducedLSPGUnsteadyNSTurb::updateAffineReference()
+{
+    affine_.update(boundaryConditions_.getCurrentBCs(), referencedFields_);
+}
+
+
+void ReducedLSPGUnsteadyNSTurb::imposeInletConditions()
+{
+    const AffineReferenceType reference = affine_.type();
+    if (reference == AffineReferenceType::None)
+    {
+        return;
+    }
+    volVectorField& U = U_();
+    surfaceScalarField& phi = phi_();
+    const Eigen::VectorXd bcs = boundaryConditions_.getCurrentBCs();
+    for (label i = 0; i < inletIndex_.rows(); ++i)
+    {
+        const label patchID = inletIndex_(i, 0);
+        const label cmpt = inletIndex_(i, 1);
+        vector velBC = { 0.0, 0.0, 0.0 };
+        velBC[cmpt] = bcs(i);
+        ITHACAutilities::assignBC(U, patchID, velBC);
+        // With the lifting functions, the inlet flux is in the lifted phi
+        if (reference == AffineReferenceType::InitialCondition)
+        {
+            phi.boundaryFieldRef()[patchID] = U.boundaryField()[patchID] & U.mesh().Sf().boundaryField()[patchID];
+        }
+    }
+}
+
 
 void ReducedLSPGUnsteadyNSTurb::initializePODCoeffsFromFields()
 {
-    volVectorField& U = _U();
-    volScalarField& p = _p();
-    surfaceScalarField& phi = _phi();
-
-    if (romSettings_.bcMethod == "lift")
+    updateAffineReference();
+    for (ReducedFieldBase& f : referencedFields_)
     {
-        for (int i = 0; i < liftFields_.size(); i++)
-        {
-            U -= boundaryConditions_.getCurrentBCs()(i) * liftFields_[i];
-            phi -= boundaryConditions_.getCurrentBCs()(i) * liftFieldsPhi_[i];
-        }
-    } else if (romSettings_.snapshotCollectionMethod == 1) // Snapshots obtained by subtracting the initial snapshot
-    {
-        const Eigen::VectorXd weights = interpolateIDW(boundaryConditions_.getCurrentBCs());
-        for (int j = 0; j < weights.size(); j++)
-        {
-            U -= weights(j) * U0field_[j];
-            phi -= weights(j) * Phi0field_[j];
-            p -= weights(j) * P0field_[j];
-        }
-        turbulence->removeInitialZeroField(weights);
+        f.removeReference();
     }
-    currentState_.head(numberOfModes_.velocity) = ITHACAutilities::getCoeffs(U, Umodes_);
-    currentState_.segment(numberOfModes_.velocity, numberOfModes_.pressure) = ITHACAutilities::getCoeffs(p, Pmodes_);
-    turbulence->computePODCoeffsFromFields(currentState_.tail(numberOfModes_.k + numberOfModes_.omega));
+    fields_.project(currentState_);
 
-    if (stateMap_.size())
+    if (joint_)
     {
         // The stacked modes are not orthonormal field by field: one weighted projection for the whole group
-        // (k_r and omega_r are the fluctuations here, as the turbulence model removed their initial fields)
-        List<Eigen::MatrixXd> fields(4);
-        fields[0] = Foam2Eigen::field2Eigen(U);
-        if (jointField_[1])
-            fields[1] = Foam2Eigen::field2Eigen(p);
-        if (jointField_[2])
-            fields[2] = Foam2Eigen::field2Eigen(_k());
-        if (jointField_[3])
-            fields[3] = Foam2Eigen::field2Eigen(_omega());
-        const Eigen::VectorXd a = jointCoefficients(fields).col(0);
-
-        const labelList fieldModes({ numberOfModes_.velocity, numberOfModes_.pressure, numberOfModes_.k, numberOfModes_.omega });
-        label offset = 0;
-        forAll(fieldModes, f)
+        const Eigen::VectorXd a = joint_->coefficients(fields_);
+        for (label f = 0; f < fields_.size(); f++)
         {
-            if (jointField_[f])
+            if (fields_[f].joint())
             {
-                currentState_.segment(offset, fieldModes[f]) = a;
+                currentState_.segment(fields_[f].offset(), fields_[f].nModes()) = a;
             }
-            offset += fieldModes[f];
         }
     }
-    currentCoords_ = reducedCoordinates(currentState_);
+    currentCoords_ = stateMap_.reduce(currentState_);
 }
+
 
 void ReducedLSPGUnsteadyNSTurb::resetToInitialCondition()
 {
@@ -768,405 +678,46 @@ void ReducedLSPGUnsteadyNSTurb::resetToInitialCondition()
         field == fieldOnDisk;
         field.clearOldTimes();
     };
-    resetFromDisk(_U());
-    resetFromDisk(_p());
-    resetFromDisk(_k());
-    resetFromDisk(_omega());
-    resetFromDisk(_nut());
+    resetFromDisk(U_());
+    resetFromDisk(p_());
+    for (volScalarField& f : turbulenceFields_)
+    {
+        resetFromDisk(f);
+    }
+    resetFromDisk(nut_());
 
-    // phi_r is not read: as in createFields.H
-    _phi() == (linearInterpolate(_U()) & mesh.Sf());
-    _phi().clearOldTimes();
+    // phi_r is not read: as in createFields
+    phi_() == (linearInterpolate(U_()) & mesh.Sf());
+    phi_().clearOldTimes();
 }
 
-void ReducedLSPGUnsteadyNSTurb::buildStateMap()
-{
-    stateMap_.resize(0, 0);
-    if (!jointField_[0])
-    {
-        return;
-    }
-    const labelList fieldModes({ numberOfModes_.velocity, numberOfModes_.pressure, numberOfModes_.k, numberOfModes_.omega });
-    const label nJoint = numberOfModes_.velocity;
-    label nState = 0;
-    label nCoords = nJoint;
-    forAll(fieldModes, f)
-    {
-        M_Assert(!jointField_[f] || fieldModes[f] == nJoint,
-            "The fields of the stacked POD must have the same number of modes.");
-        nState += fieldModes[f];
-        nCoords += jointField_[f] ? 0 : fieldModes[f];
-    }
 
-    stateMap_ = Eigen::MatrixXd::Zero(nState, nCoords);
-    label row = 0;
-    label col = nJoint;
-    forAll(fieldModes, f)
+wordList ReducedLSPGUnsteadyNSTurb::coordinateLabels() const
+{
+    DynamicList<word> labels;
+    if (!stateMap_.identity())
     {
-        for (label i = 0; i < fieldModes[f]; i++)
+        for (label f = 0; f < fields_.size(); f++)
         {
-            stateMap_(row + i, jointField_[f] ? i : col + i) = 1.0;
-        }
-        row += fieldModes[f];
-        col += jointField_[f] ? 0 : fieldModes[f];
-    }
-    Info << "### Stacked POD: " << nCoords << " reduced coordinates for a state of size " << nState << endl;
-}
-
-Eigen::VectorXd ReducedLSPGUnsteadyNSTurb::reducedCoordinates(const Eigen::VectorXd& state) const
-{
-    if (!stateMap_.size())
-    {
-        return state;
-    }
-    // E has 0/1 entries and orthogonal columns: (E^T E)^-1 E^T averages the copies of a shared coefficient
-    const Eigen::VectorXd copies = stateMap_.colwise().sum().transpose();
-    return (stateMap_.transpose() * state).cwiseQuotient(copies);
-}
-
-Eigen::MatrixXd ReducedLSPGUnsteadyNSTurb::jointCoefficients(const List<Eigen::MatrixXd>& snapshots)
-{
-    const label n = numberOfModes_.velocity;
-    const label m = snapshots[0].cols();
-    Eigen::MatrixXd G = Eigen::MatrixXd::Zero(n, n);
-    Eigen::MatrixXd B = Eigen::MatrixXd::Zero(n, m);
-    addJointProjection(Umodes_, snapshots[0], jointWeights_(0), G, B);
-    if (jointField_[1])
-        addJointProjection(Pmodes_, snapshots[1], jointWeights_(1), G, B);
-    if (jointField_[2])
-        addJointProjection(kModes_, snapshots[2], jointWeights_(2), G, B);
-    if (jointField_[3])
-        addJointProjection(omegaModes_, snapshots[3], jointWeights_(3), G, B);
-    if (Pstream::parRun())
-    {
-        reduce(G, sumOp<Eigen::MatrixXd>());
-        reduce(B, sumOp<Eigen::MatrixXd>());
-    }
-    return G.ldlt().solve(B);
-}
-// currentState_.segment(numberOfModes_.velocity + numberOfModes_.pressure, numberOfModes_.k) = ITHACAutilities::getCoeffs(k, kModes_);
-// currentState_.tail(numberOfModes_.omega) = ITHACAutilities::getCoeffs(omega, omegaModes_);
-// currentNutCoeffs_ = ITHACAutilities::getCoeffs(nutFields_[0], Nutmodes_);
-// currentNutAvgCoeffs_ = interpolateIDW(boundaryConditions_.getCurrentBCs());
-// }
-
-
-void ReducedLSPGUnsteadyNSTurb::interpolateNutCoeffs(volScalarField& nut_field, volScalarModes& nut_modes, const Eigen::VectorXd& state)
-{
-    // Uses RBF to interpolate nut coefficients, then sums the Inverse Distance Weighted average fields
-    const label inputRBFSize =
-        interpolationSettings_.dimInputRBF > 0
-        ? interpolationSettings_.dimInputRBF
-        : numberOfModes_.velocity;
-
-    const Eigen::VectorXd velocity_coeffs = state.head(inputRBFSize);
-    if (interpolationSettings_.derivative)
-    {
-        const Eigen::VectorXd velocity_coeffs_derivative = (state - oldState_).head(inputRBFSize) / runTime().deltaTValue();
-        Eigen::VectorXd inputVector = Eigen::VectorXd(inputRBFSize * 2);
-        inputVector << velocity_coeffs, velocity_coeffs_derivative;
-        for (int j = 0; j < nut_modes.size(); j++)
-        {
-            currentNutCoeffs_(j) = rbfSplines_[j]->predict(inputVector);
-        }
-    } else
-    {
-        for (int j = 0; j < nut_modes.size(); j++)
-        {
-            currentNutCoeffs_(j) = rbfSplines_[j]->predict(velocity_coeffs);
-        }
-    }
-    nut_field = nut_modes.reconstruct(nut_field, currentNutCoeffs_, "nut_r");
-    for (int k = 0; k < currentNutAvgCoeffs_.size(); k++)
-    {
-        nut_field += currentNutAvgCoeffs_(k) * avgNutFields_[k];
-    }
-    // Clip to ensure non-negative values
-    nut_field.internalFieldRef() = Foam::max(nut_field.internalFieldRef(), nut_field.internalFieldRef() * 0.0);
-    nut_field.correctBoundaryConditions();
-}
-
-
-Eigen::VectorXd ReducedLSPGUnsteadyNSTurb::interpolateIDW(const Eigen::VectorXd&
-        input_parameters) const
-{
-    M_Assert(input_parameters.size() == mu_.rows(),
-        "Input parameters size to the linear interpolation does not match the expected size.");
-    const label n_samples = mu_.cols();
-    Eigen::VectorXd weights(n_samples);
-
-    // Parameters normalised by their range over the training runs, so that they weigh equally in the distance
-    const Eigen::VectorXd lower = mu_.rowwise().minCoeff();
-    const Eigen::VectorXd range = mu_.rowwise().maxCoeff() - lower;
-    auto normalised = [&](const Eigen::VectorXd& x) {
-        Eigen::VectorXd y = Eigen::VectorXd::Zero(x.size());
-        for (label j = 0; j < x.size(); j++)
-        {
-            y(j) = range(j) > 1e-15 ? (x(j) - lower(j)) / range(j) : 0.0;
-        }
-        return y;
-    };
-
-    const Eigen::VectorXd target = normalised(input_parameters);
-    Eigen::VectorXd distances(n_samples);
-    for (label i = 0; i < n_samples; i++)
-    {
-        distances(i) = std::pow((target - normalised(mu_.col(i))).norm(), idwExponent_);
-        if (distances(i) <= 1e-10)
-        {
-            // A training parameter
-            weights.setZero();
-            weights(i) = 1.0;
-            return weights;
-        }
-    }
-
-    // Only the idwNeighbours_ nearest runs (all the runs at the cut-off distance are kept)
-    scalar cutOff = GREAT;
-    if (idwNeighbours_ > 0 && idwNeighbours_ < n_samples)
-    {
-        std::vector<scalar> sorted(distances.data(), distances.data() + n_samples);
-        std::sort(sorted.begin(), sorted.end());
-        cutOff = sorted[idwNeighbours_ - 1];
-    }
-    for (label i = 0; i < n_samples; i++)
-    {
-        weights(i) = distances(i) <= cutOff ? 1.0 / distances(i) : 0.0;
-    }
-
-    const double weightSum = weights.sum();
-    if (weightSum > 1e-10)
-    {
-        weights /= weightSum;
-    } else
-    {
-        weights.setConstant(1.0 / n_samples);
-    }
-
-    return weights;
-}
-
-
-Eigen::VectorXd ReducedLSPGUnsteadyNSTurb::residualBlockWeights() const
-{
-    Eigen::VectorXd weights(5);
-    weights << residualWorkspace_.blockWeight(iU_),
-        residualWorkspace_.blockWeight(iP_),
-        residualWorkspace_.blockWeight(iK_),
-        residualWorkspace_.blockWeight(iOmega_),
-        iPhi_ >= 0 ? residualWorkspace_.blockWeight(iPhi_) : 0.0;
-    return weights;
-}
-
-
-Eigen::MatrixXd ReducedLSPGUnsteadyNSTurb::evaluateResidualOnTrajectory(
-    const word& bcROM,
-    const PtrList<volVectorField>& Ufom,
-    const PtrList<surfaceScalarField>& phiFom,
-    const PtrList<volScalarField>& pFom,
-    const PtrList<volScalarField>& kFom,
-    const PtrList<volScalarField>& omegaFom,
-    const Eigen::VectorXd& times,
-    const scalar deltaT,
-    const word& mode,
-    const fileName& pressureCheckFile,
-    const PtrList<volScalarField>* nutFom)
-{
-    M_Assert(mode == "exact" || mode == "projected",
-        "evaluateResidualOnTrajectory: mode must be 'exact' or 'projected'.");
-    const label nSteps = Ufom.size();
-    M_Assert(phiFom.size() == nSteps && pFom.size() == nSteps && kFom.size() == nSteps && omegaFom.size() == nSteps && times.size() == nSteps,
-        "evaluateResidualOnTrajectory: all field lists and the time vector must have the same size.");
-    M_Assert(nSteps >= 3, "evaluateResidualOnTrajectory: at least 3 consecutive states are needed.");
-
-    Time& runTime = this->runTime();
-    volVectorField& U = _U();
-    volScalarField& p = _p();
-    surfaceScalarField& phi = _phi();
-    volScalarField& k = _k();
-    volScalarField& omega = _omega();
-
-    const scalar savedTime = runTime.value();
-    const label savedIndex = runTime.timeIndex();
-    const scalar savedDeltaT = runTime.deltaTValue();
-
-    boundaryConditions_ = BoundaryConditions { bcROM, "linear" };
-
-    // Two increments ending at times(0), so that deltaT0 = deltaT for the backward scheme
-    runTime.setDeltaT(deltaT, false);
-    runTime.setTime(times(0) - 2 * deltaT, savedIndex + 1);
-    runTime++;
-    runTime++;
-
-    Eigen::MatrixXd out(nSteps - 2, 7);
-
-    // Pressure residual diagnostics, exact mode only
-    std::ofstream pCheck;
-    if (mode == "exact" && !pressureCheckFile.empty() && Pstream::master())
-    {
-        pCheck.open(pressureCheckFile);
-        pCheck << std::scientific << std::setprecision(8) << PressureResidualCheck::header(mesh())
-               << " relNut relPhiOld relUOld relUOldOld" << std::endl;
-    }
-
-    // Every block of the weighted residual split by region, and its largest cell (location of the inconsistency)
-    wordList regionNames;
-    List<boolList> regionMasks;
-    PressureResidualCheck::regions(mesh(), regionNames, regionMasks);
-    const wordList blockNames({ "U", "p", "k", "omega" });
-    const labelList blockIds({ iU_, iP_, iK_, iOmega_ });
-    std::ofstream blockCheck;
-    if (pCheck.is_open())
-    {
-        blockCheck.open(pressureCheckFile.path() / "blockRegions_disk.dat");
-        blockCheck << "# weighted residual (as minimised by LM) per block and region; max = largest cell: value, x, y\n# time";
-        for (const word& b : blockNames)
-        {
-            for (const word& r : regionNames)
+            if (fields_[f].joint())
             {
-                blockCheck << " " << b << "_" << r;
+                for (label i = 0; i < fields_[f].nModes(); i++)
+                {
+                    labels.push_back("joint" + name(i + 1));
+                }
+                break;
             }
-            blockCheck << " " << b << "_maxValue " << b << "_maxX " << b << "_maxY";
         }
-        // Cells whose FOM value is the neighbour average Foam::bound assigns to negative cells after the solve
-        blockCheck << " kBoundedCells omegaBoundedCells kMaxCellBounded";
-        blockCheck << std::endl;
     }
-    for (label n = 0; n < nSteps; n++)
+    for (label f = 0; f < fields_.size(); f++)
     {
-        if (n > 0)
+        if (stateMap_.identity() || !fields_[f].joint())
         {
-            runTime.setTime(times(n), runTime.timeIndex() + 1);
-        }
-        boundaryConditions_.updateTimeDependentBC(times(n));
-
-        // The first modification at a new time index stores the previous state as oldTime,
-        // so the old time levels are the previous (exact or projected) FOM states
-        U == Ufom[n];
-        p == pFom[n];
-        phi == phiFom[n];
-        k == kFom[n];
-        omega == omegaFom[n];
-
-        updatePreconditioner_ = true;
-        if (mode == "projected")
-        {
-            initializePODCoeffsFromFields();
-            assembleResidual(currentState_, true, false);
-        } else
-        {
-            turbulence->correctNut();
-            residualWithCurrentFields();
-        }
-
-        if (pCheck.is_open() && n >= 2)
-        {
-            // nut recomputed by the ROM from the FOM (U, k, omega) against the FOM nut, and the old time
-            // levels used by ddt and ddtCorr against the previous FOM states
-            const scalarField& V = mesh().V().field();
-            auto relV = [&](const auto& a, const auto& b) {
-                return PressureResidualCheck::volumeNorm(a - b, V) / max(PressureResidualCheck::volumeNorm(b, V), VSMALL);
-            };
-            const scalar relNut = nutFom ? relV(_nut().primitiveField(), (*nutFom)[n].primitiveField()) : -1;
-            const scalarField& phiOld = phi.oldTime().primitiveField();
-            const scalarField& phiPrev = phiFom[n - 1].primitiveField();
-            const scalar relPhiOld = Foam::sqrt(sum(sqr(phiOld - phiPrev)) / max(sum(sqr(phiPrev)), VSMALL));
-            const scalar relUOld = relV(U.oldTime().primitiveField(), Ufom[n - 1].primitiveField());
-            const scalar relUOldOld = relV(U.oldTime().oldTime().primitiveField(), Ufom[n - 2].primitiveField());
-
-            const PressureResidualCheck::Terms terms = pressureResidualTerms();
-            PressureResidualCheck::writeRow(pCheck, times(n), terms, mesh(), U.primitiveField());
-            pCheck << " " << relNut << " " << relPhiOld << " " << relUOld << " " << relUOldOld << std::endl;
-
-            blockCheck << std::scientific << std::setprecision(8) << times(n);
-            const vectorField& C = mesh().C().primitiveField();
-            forAll(blockIds, b)
+            for (label i = 0; i < fields_[f].nModes(); i++)
             {
-                const Eigen::Ref<const Eigen::VectorXd> r = residualWorkspace_.block(blockIds[b]);
-                const label nPerCell = r.size() / mesh().nCells();
-                scalarField cellSqr(mesh().nCells(), 0.0);
-                forAll(cellSqr, celli)
-                {
-                    cellSqr[celli] = r.segment(nPerCell * celli, nPerCell).squaredNorm();
-                }
-                for (const boolList& mask : regionMasks)
-                {
-                    scalar s2 = 0;
-                    forAll(cellSqr, celli)
-                    {
-                        s2 += mask[celli] ? cellSqr[celli] : 0;
-                    }
-                    blockCheck << " " << Foam::sqrt(s2);
-                }
-                const label imax = findMax(cellSqr);
-                blockCheck << " " << Foam::sqrt(cellSqr[imax]) << " " << C[imax].x() << " " << C[imax].y();
+                labels.push_back(fields_[f].name() + name(i + 1));
             }
-
-            // Foam::bound sets a negative cell to fvc::average(max(f, fMin)) evaluated with the cell itself at fMin
-            // (kOmegaSST: kMin = omegaMin = SMALL): k_P = sum_f |Sf| (w_P fMin + (1 - w_P) f_N) / sum_f |Sf|,
-            // with w_P the linear-interpolation weight of P. Internal faces only (cells next to a patch are skipped)
-            auto boundedCells = [this](const volScalarField& f) {
-                const fvMesh& m = mesh();
-                const labelUList& own = m.owner();
-                const labelUList& nei = m.neighbour();
-                const scalarField& w = m.weights().primitiveField();
-                const scalarField& magSf = m.magSf().primitiveField();
-                scalarField sumA(m.nCells(), 0.0), sumNb(m.nCells(), 0.0), sumW(m.nCells(), 0.0);
-                forAll(own, facei)
-                {
-                    const label P = own[facei], N = nei[facei];
-                    sumA[P] += magSf[facei];
-                    sumA[N] += magSf[facei];
-                    sumNb[P] += magSf[facei] * (1 - w[facei]) * f[N];
-                    sumNb[N] += magSf[facei] * w[facei] * f[P];
-                    sumW[P] += magSf[facei] * w[facei];
-                    sumW[N] += magSf[facei] * (1 - w[facei]);
-                }
-                boolList onPatch(m.nCells(), false);
-                forAll(m.boundary(), patchi)
-                {
-                    for (const label celli : m.boundary()[patchi].faceCells())
-                    {
-                        onPatch[celli] = true;
-                    }
-                }
-                boolList mask(f.size(), false);
-                forAll(mask, celli)
-                {
-                    if (!onPatch[celli] && sumA[celli] > 0)
-                    {
-                        const scalar avg = (sumNb[celli] + sumW[celli] * SMALL) / sumA[celli];
-                        mask[celli] = mag(f[celli] - avg) <= 1e-9 * max(mag(avg), VSMALL);
-                    }
-                }
-                return mask;
-            };
-            const boolList kBounded = boundedCells(kFom[n]);
-            const boolList omegaBounded = boundedCells(omegaFom[n]);
-            label kMaxCell = 0;
-            {
-                const Eigen::Ref<const Eigen::VectorXd> r = residualWorkspace_.block(iK_);
-                r.cwiseAbs().maxCoeff(&kMaxCell);
-            }
-            blockCheck << " " << std::count(kBounded.begin(), kBounded.end(), true)
-                       << " " << std::count(omegaBounded.begin(), omegaBounded.end(), true)
-                       << " " << kBounded[kMaxCell];
-            blockCheck << std::endl;
-        }
-
-        if (n >= 2)
-        {
-            out(n - 2, 0) = times(n);
-            out(n - 2, 1) = residualWorkspace_.vector().norm();
-            out(n - 2, 2) = residualWorkspace_.blockNorm(iU_);
-            out(n - 2, 3) = residualWorkspace_.blockNorm(iP_);
-            out(n - 2, 4) = residualWorkspace_.blockNorm(iK_);
-            out(n - 2, 5) = residualWorkspace_.blockNorm(iOmega_);
-            out(n - 2, 6) = phiBlockNorm();
         }
     }
-
-    runTime.setDeltaT(savedDeltaT, false);
-    runTime.setTime(savedTime, savedIndex);
-    return out;
+    return wordList(std::move(labels));
 }
