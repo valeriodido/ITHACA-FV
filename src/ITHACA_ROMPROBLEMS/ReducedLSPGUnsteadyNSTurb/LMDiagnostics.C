@@ -60,24 +60,33 @@ struct Evaluation
     boolList phiPositive;
 };
 
-/// Number of entries that differ between two masks
-label nSwitched(const boolList& a, const boolList& b)
+// Every vector in residual space holds the rows of this processor only: norms and counts are summed over the
+// processors, and every processor gets the same values (the tables are written by the master)
+
+/// Norm of a residual-space vector over all the processors
+double globalNorm(const Eigen::Ref<const Eigen::VectorXd>& v)
 {
-    if (a.size() != b.size())
-    {
-        return 0;
-    }
-    label n = 0;
-    forAll(a, i)
-    {
-        if (a[i] != b[i])
-        {
-            n++;
-        }
-    }
-    return n;
+    return std::sqrt(returnReduce(v.squaredNorm(), sumOp<scalar>()));
 }
 
+/// Number of entries that differ between two masks, over all the processors
+label nSwitched(const boolList& a, const boolList& b)
+{
+    label n = 0;
+    if (a.size() == b.size())
+    {
+        forAll(a, i)
+        {
+            if (a[i] != b[i])
+            {
+                n++;
+            }
+        }
+    }
+    return returnReduce(n, sumOp<label>());
+}
+
+/// Number of true entries, over all the processors
 label nTrue(const boolList& a)
 {
     label n = 0;
@@ -88,7 +97,22 @@ label nTrue(const boolList& a)
             n++;
         }
     }
-    return n;
+    return returnReduce(n, sumOp<label>());
+}
+
+/// Upper-triangular factor R of the Jacobian distributed by rows over the processors (J = Q R, R is n x n):
+/// the local R factors are stacked and factorised again (TSQR). J and R have the same singular values and right
+/// singular vectors, and J^T J = R^T R
+Eigen::MatrixXd globalTriangularFactor(const Eigen::MatrixXd& J)
+{
+    const label n = J.cols();
+    const label k = std::min<label>(J.rows(), n);
+    const Eigen::HouseholderQR<Eigen::MatrixXd> localQR(J);
+    Eigen::MatrixXd stacked = Eigen::MatrixXd::Zero(Pstream::nProcs() * n, n);
+    stacked.block(Pstream::myProcNo() * n, 0, k, n) = localQR.matrixQR().topRows(k).triangularView<Eigen::Upper>();
+    reduce(stacked, sumOp<Eigen::MatrixXd>());
+    const Eigen::HouseholderQR<Eigen::MatrixXd> globalQR(stacked);
+    return globalQR.matrixQR().topRows(n).triangularView<Eigen::Upper>();
 }
 
 /// Kink indicator ||(rPlus - r0) + (rMinus - r0)|| / ||rPlus - rMinus|| of two vector segments
@@ -97,8 +121,8 @@ double kinkIndicator(
     const Eigen::Ref<const Eigen::VectorXd>& rMinus,
     const Eigen::Ref<const Eigen::VectorXd>& r0)
 {
-    const double num = (rPlus + rMinus - 2.0 * r0).norm();
-    const double den = (rPlus - rMinus).norm();
+    const double num = globalNorm(rPlus + rMinus - 2.0 * r0);
+    const double den = globalNorm(rPlus - rMinus);
     if (den > 0)
     {
         return num / den;
@@ -213,9 +237,9 @@ void LMDiagnostics::run(
 
     // ------------------------------------------------------------------ 1. Point where LM stopped
     const Evaluation base = evaluate(y);
-    const double r0 = base.r.norm();
+    const double r0 = globalNorm(base.r);
     const scalarField& phiBase = phi_.primitiveField();
-    const scalar phiMax = max(mag(phiBase));
+    const scalar phiMax = gMax(mag(phiBase));
     label nNearZeroPhi = 0;
     forAll(phiBase, facei)
     {
@@ -224,25 +248,30 @@ void LMDiagnostics::run(
             nNearZeroPhi++;
         }
     }
+    reduce(nNearZeroPhi, sumOp<label>());
     const label nClippedK = base.clipped.size() >= 2 ? nTrue(base.clipped[0]) : -1;
     const label nClippedOmega = base.clipped.size() >= 2 ? nTrue(base.clipped[1]) : -1;
 
     summary << "=== LM diagnostics at t = " << time << ", status " << status << "\n\n"
-            << "Reduced coordinates: " << n << ", residual rows: " << m << ", ||r(y)|| = " << r0 << "\n"
+            << "Reduced coordinates: " << n << ", residual rows: " << returnReduce(m, sumOp<label>())
+            << ", ||r(y)|| = " << r0 << "\n"
             << "||y||_inf = " << y.cwiseAbs().maxCoeff() << " (scaled coordinates, O(1) in the training range)\n"
             << "Clipped cells at y: k " << nClippedK << ", omega " << nClippedOmega
             << " | internal faces with |phi| < 1e-6 max|phi|: " << nNearZeroPhi << "\n";
     summary << "Blocks at y:";
     for (label b = 0; b < nBlocks; b++)
     {
-        summary << " " << blockNames[b] << " " << (blocks[b] >= 0 ? segment(base.r, b).norm() : 0.0);
+        summary << " " << blockNames[b] << " " << (blocks[b] >= 0 ? globalNorm(segment(base.r, b)) : 0.0);
     }
     summary << "\n\n";
 
     // ------------------------------------------------------------------ 2. Jacobian conditioning
     Eigen::MatrixXd J(m, n);
     functor.df(y, J);
-    Eigen::BDCSVD<Eigen::MatrixXd> svd(J, Eigen::ComputeThinV);
+    // In parallel J holds the rows of this processor: its R factor over all the processors has the same singular
+    // values and right singular vectors as the global J
+    const Eigen::MatrixXd R = Pstream::parRun() ? globalTriangularFactor(J) : Eigen::MatrixXd();
+    Eigen::BDCSVD<Eigen::MatrixXd> svd(Pstream::parRun() ? R : J, Eigen::ComputeThinV);
     const Eigen::VectorXd sv = svd.singularValues();
     const Eigen::MatrixXd& V = svd.matrixV();
     const double svMax = sv(0);
@@ -282,8 +311,23 @@ void LMDiagnostics::run(
     summary << "\n\n";
 
     // ------------------------------------------------------------------ 3. Direction scans
-    const Eigen::VectorXd dGN = J.colPivHouseholderQr().solve(-base.r);
-    const Eigen::VectorXd dSD = -(J.transpose() * base.r);
+    Eigen::VectorXd dSD = -(J.transpose() * base.r);
+    Eigen::VectorXd dGN;
+    if (Pstream::parRun())
+    {
+        // Least-squares Gauss-Newton step from the global J^T r: with R = U S V^T, d = -V S^-2 V^T J^T r
+        // (directions with sigma < 1e-12 sigma_max are dropped)
+        reduce(dSD, sumOp<Eigen::VectorXd>());
+        Eigen::VectorXd invS2 = Eigen::VectorXd::Zero(n);
+        for (label i = 0; i < n; i++)
+        {
+            invS2(i) = sv(i) > 1e-12 * sv(0) ? 1.0 / (sv(i) * sv(i)) : 0.0;
+        }
+        dGN = V * invS2.asDiagonal() * V.transpose() * dSD;
+    } else
+    {
+        dGN = J.colPivHouseholderQr().solve(-base.r);
+    }
     const List<std::pair<word, Eigen::VectorXd>> directions({ { "gaussNewton", dGN }, { "steepestDescent", dSD } });
     // Smallest step with an actual decrease, per direction (-1 if none)
     List<scalar> firstDecrease(directions.size(), -1);
@@ -318,11 +362,17 @@ void LMDiagnostics::run(
         for (const scalar s : sortedSteps)
         {
             const Evaluation e = evaluate(y + s * dHat);
-            const double total = e.r.norm();
-            const double predicted = (base.r + s * JdHat).norm();
+            const double total = globalNorm(e.r);
+            const double predicted = globalNorm(base.r + s * JdHat);
             const double actualReduction = r0 - total;
             const double predictedReduction = r0 - predicted;
             const FixedList<label, 3> sw = switches(base, e);
+            // Collective: computed on every processor, written by the master
+            scalarList blockNorms(nBlocks, 0.0);
+            for (label b = 0; b < nBlocks; b++)
+            {
+                blockNorms[b] = blocks[b] >= 0 ? globalNorm(segment(e.r, b)) : 0.0;
+            }
             if (actualReduction > 0)
             {
                 smallestDecrease = s;
@@ -336,7 +386,7 @@ void LMDiagnostics::run(
                 out << s << " " << total;
                 for (label b = 0; b < nBlocks; b++)
                 {
-                    out << " " << (blocks[b] >= 0 ? segment(e.r, b).norm() : 0.0);
+                    out << " " << blockNorms[b];
                 }
                 out << " " << predicted << " " << actualReduction << " " << predictedReduction
                     << " " << sw[0] << " " << sw[1] << " " << sw[2] << "\n";
@@ -383,7 +433,7 @@ void LMDiagnostics::run(
                 {
                     K(b + 1) = blocks[b] >= 0 ? kinkIndicator(segment(ePlus.r, b), segment(eMinus.r, b), segment(base.r, b)) : 0.0;
                 }
-                const double columnNorm = (ePlus.r - eMinus.r).norm() / (2 * s);
+                const double columnNorm = globalNorm(ePlus.r - eMinus.r) / (2 * s);
                 const FixedList<label, 3> swPlus = switches(base, ePlus);
                 const FixedList<label, 3> swMinus = switches(base, eMinus);
                 FixedList<label, 3> sw;

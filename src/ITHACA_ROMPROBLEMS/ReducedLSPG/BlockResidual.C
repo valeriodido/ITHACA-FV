@@ -131,7 +131,8 @@ void BlockResidual::calibrateWeights(double minRelative)
         ? (block.rowWeights.array() * seg.array()).square().sum()
         : seg.squaredNorm();
     }
-    norms[i] = std::sqrt(sq); // Watch out parallelization here
+    // Summed over the processors: every processor gets the same weights
+    norms[i] = std::sqrt(Foam::returnReduce(sq, Foam::sumOp<double>()));
     maxNorm = std::max(maxNorm, norms[i]);
   }
 
@@ -183,15 +184,15 @@ void BlockResidual::applyScaling() const
 
 double BlockResidual::norm() const
 {
-  // A OpenMPI safe way must be implemented 
-  return vector().norm();
+  // A OpenMPI safe way must be implemented. This should do
+  return std::sqrt(Foam::returnReduce(vector().squaredNorm(), Foam::sumOp<double>()));
 }
 
 double BlockResidual::blockNorm(int block_index) const
 {
   const Block& block = at(block_index);
   applyScaling();
-  return scaled_.segment(block.offset, block.size).norm();
+  return std::sqrt(Foam::returnReduce(scaled_.segment(block.offset, block.size).squaredNorm(), Foam::sumOp<double>()));
 }
 
 const Eigen::VectorXd& BlockResidual::vector() const

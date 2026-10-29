@@ -74,9 +74,9 @@ LMStepResult LMDriver::solve(Eigen::VectorXd& y)
 {
     using namespace Eigen::LevenbergMarquardtSpace;
     LMStepResult result;
-    // minimizeInit evaluates the residual at the initial guess
     result.status = lm_.minimizeInit(y);
-    result.initialNorm = lm_.fvec.norm();
+    // Over all the processors, unlike fvec, which only holds the rows of this processor
+    result.initialNorm = functor_.reducedProblem_->residualNorm();
     while ((result.status == NotStarted || result.status == Running) && result.iterations < maxIterations_)
     {
         result.status = lm_.minimizeOneStep(y);

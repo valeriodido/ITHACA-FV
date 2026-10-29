@@ -110,6 +110,12 @@ public:
         return romSettings_.romID;
     }
 
+    /// @brief Norm of the weighted residual at the last evaluation, over all the processors
+    double residualNorm() const
+    {
+        return residual_.norm();
+    }
+
     /// @brief Block weights currently applied to the reported blocks of the residual (0 for an absent block)
     Eigen::VectorXd residualBlockWeights() const;
 

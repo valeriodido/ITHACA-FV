@@ -10,7 +10,8 @@ namespace
 /// Cells whose value is the neighbour average Foam::bound assigns to negative cells after a FOM solve.
 /// Foam::bound sets a negative cell to fvc::average(max(f, fMin)) evaluated with the cell itself at fMin
 /// (kOmegaSST: kMin = omegaMin = SMALL): f_P = sum_f |Sf| (w_P fMin + (1 - w_P) f_N) / sum_f |Sf|,
-/// with w_P the linear-interpolation weight of P. Internal faces only (cells next to a patch are skipped)
+/// with w_P the linear-interpolation weight of P. Internal faces only (cells next to a patch, processor patches
+/// included, are skipped)
 boolList boundedCells(const volScalarField& f)
 {
     const fvMesh& m = f.mesh();
@@ -96,9 +97,10 @@ Eigen::MatrixXd ReducedLSPGUnsteadyNSTurb::evaluateResidualOnTrajectory(
     const labelList& reported = reportedBlocks();
     Eigen::MatrixXd out(nSteps - 2, 2 + reported.size());
 
-    // Pressure residual diagnostics, exact mode only
+    // Pressure residual diagnostics, exact mode only. The files are written by the master only
+    const bool pressureCheck = mode == "exact" && !pressureCheckFile.empty();
     std::ofstream pCheck;
-    if (mode == "exact" && !pressureCheckFile.empty() && Pstream::master())
+    if (pressureCheck && Pstream::master())
     {
         pCheck.open(pressureCheckFile);
         pCheck << std::scientific << std::setprecision(8) << PressureResidualCheck::header(mesh)
@@ -159,7 +161,8 @@ Eigen::MatrixXd ReducedLSPGUnsteadyNSTurb::evaluateResidualOnTrajectory(
             residualWithCurrentFields();
         }
 
-        if (pCheck.is_open() && n >= 2)
+        // Evaluated on every processor (the norms are collective); only the master writes
+        if (pressureCheck && n >= 2)
         {
             // nut recomputed by the ROM from the FOM (U, k, omega) against the FOM nut, and the old time
             // levels used by ddt and ddtCorr against the previous FOM states
@@ -170,7 +173,7 @@ Eigen::MatrixXd ReducedLSPGUnsteadyNSTurb::evaluateResidualOnTrajectory(
             const scalar relNut = nutFom ? relV(nut_().primitiveField(), (*nutFom)[n].primitiveField()) : -1;
             const scalarField& phiOld = phi.oldTime().primitiveField();
             const scalarField& phiPrev = phiFom[n - 1].primitiveField();
-            const scalar relPhiOld = Foam::sqrt(sum(sqr(phiOld - phiPrev)) / max(sum(sqr(phiPrev)), VSMALL));
+            const scalar relPhiOld = Foam::sqrt(gSum(sqr(phiOld - phiPrev)) / max(gSum(sqr(phiPrev)), VSMALL));
             const scalar relUOld = relV(U.oldTime().primitiveField(), Ufom[n - 1].primitiveField());
             const scalar relUOldOld = relV(U.oldTime().oldTime().primitiveField(), Ufom[n - 2].primitiveField());
 
@@ -196,29 +199,36 @@ Eigen::MatrixXd ReducedLSPGUnsteadyNSTurb::evaluateResidualOnTrajectory(
                     {
                         s2 += mask[celli] ? cellSqr[celli] : 0;
                     }
-                    blockCheck << " " << Foam::sqrt(s2);
+                    blockCheck << " " << Foam::sqrt(returnReduce(s2, sumOp<scalar>()));
                 }
+                // Largest cell over all the processors, and its centre (sent by the processor that holds it)
                 const label imax = findMax(cellSqr);
-                blockCheck << " " << Foam::sqrt(cellSqr[imax]) << " " << C[imax].x() << " " << C[imax].y();
+                const scalar localMax = imax >= 0 ? cellSqr[imax] : -GREAT;
+                const scalar globalMax = returnReduce(localMax, maxOp<scalar>());
+                const bool holdsMax = imax >= 0 && localMax == globalMax;
+                blockCheck << " " << Foam::sqrt(globalMax)
+                           << " " << returnReduce(holdsMax ? C[imax].x() : -GREAT, maxOp<scalar>())
+                           << " " << returnReduce(holdsMax ? C[imax].y() : -GREAT, maxOp<scalar>());
             }
 
             const boolList kBounded = boundedCells(kFom[n]);
             const boolList omegaBounded = boundedCells(omegaFom[n]);
+            // Whether the cell with the largest k residual (over all the processors) is a bounded cell
             label kMaxCell = 0;
-            {
-                const Eigen::Ref<const Eigen::VectorXd> r = residual_.block(iTurbulence_[0]);
-                r.cwiseAbs().maxCoeff(&kMaxCell);
-            }
-            blockCheck << " " << std::count(kBounded.begin(), kBounded.end(), true)
-                       << " " << std::count(omegaBounded.begin(), omegaBounded.end(), true)
-                       << " " << kBounded[kMaxCell];
+            const scalar kLocalMax = residual_.block(iTurbulence_[0]).cwiseAbs().maxCoeff(&kMaxCell);
+            const bool holdsKMax = kLocalMax == returnReduce(kLocalMax, maxOp<scalar>());
+            const label kMaxCellBounded = returnReduce(label(holdsKMax && kBounded[kMaxCell]), maxOp<label>());
+            const label nKBounded = returnReduce(label(std::count(kBounded.begin(), kBounded.end(), true)), sumOp<label>());
+            const label nOmegaBounded =
+                returnReduce(label(std::count(omegaBounded.begin(), omegaBounded.end(), true)), sumOp<label>());
+            blockCheck << " " << nKBounded << " " << nOmegaBounded << " " << kMaxCellBounded;
             blockCheck << std::endl;
         }
 
         if (n >= 2)
         {
             out(n - 2, 0) = times(n);
-            out(n - 2, 1) = residual_.vector().norm();
+            out(n - 2, 1) = residual_.norm();
             forAll(reported, i)
             {
                 out(n - 2, 2 + i) = reportedBlockNorm(i);

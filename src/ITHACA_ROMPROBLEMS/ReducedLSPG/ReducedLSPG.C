@@ -133,9 +133,9 @@ void ReducedLSPG::runOnline(const word& folder)
 
     initializePODCoeffsFromFields();
     collector_.requestPreconditionerUpdate();
-    assembleResidual(currentState_, true, true);
+    assembleResidual(currentState_, true, false);
 
-    Info << "\nInitial residual norm: " << residual_.vector().norm() << nl;
+    Info << "\nInitial residual norm: " << residual_.norm() << nl;
     printBlockNorms();
     Info << endl;
     if (romSettings_.residualPreconditioner == ResidualPreconditionerType::None)
@@ -201,14 +201,14 @@ void ReducedLSPG::runOnline(const word& folder)
 
         printBlockNorms();
         Info << "  - Initial residual norm: " << result.initialNorm << nl
-             << "  - Final residual norm: " << residual_.vector().norm() << nl
+             << "  - Final residual norm: " << residual_.norm() << nl
              << "  - Function evaluations: " << lm.nfev() << nl;
         timeStepCompleted();
         Info << endl;
 
         if (Pstream::master())
         {
-            residualLog << runTime.value() << " " << result.initialNorm << " " << residual_.vector().norm();
+            residualLog << runTime.value() << " " << result.initialNorm << " " << residual_.norm();
             forAll(reportedBlocks_, i)
             {
                 residualLog << " " << reportedBlockNorm(i);

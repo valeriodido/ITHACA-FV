@@ -81,11 +81,11 @@ class BlockResidual
     /// @return Eigen::Ref<const Eigen::VectorXd> of the scaled block
     Eigen::Ref<const Eigen::VectorXd> block(int block_index) const;
 
-    /// @brief Returns the norm
+    /// @brief Returns the norm, over all the processors
     /// @return double of the norm of the scaled residual
     double norm() const;
 
-    /// @brief Returns the norm of a specific block
+    /// @brief Returns the norm of a specific block, over all the processors
     /// @param block_index Index of the block to return the norm of
     /// @return double of the norm of the scaled block
     double blockNorm(int block_index) const;
@@ -114,7 +114,7 @@ class BlockResidual
     /// @brief Name of a block
     const std::string& name(int block_index) const;
 
-    /// @brief Calibrates the weights as 1/||block||
+    /// @brief Calibrates the weights as 1/||block||, with the block norms over all the processors
     void calibrateWeights(double minRelative=1e-8);
     // Hyper-reduction will go here
 

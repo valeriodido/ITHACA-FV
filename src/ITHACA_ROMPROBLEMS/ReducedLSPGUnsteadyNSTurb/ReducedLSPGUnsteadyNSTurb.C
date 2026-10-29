@@ -39,11 +39,11 @@ scalar fieldRMS(const PtrList<GeometricField<Type, fvPatchField, volMesh>>& snap
 {
     M_Assert(snapshots.size() > 0, "fieldRMS: no snapshots available to compute the field scale.");
     const scalarField& V = snapshots[0].mesh().V().field();
-    const scalar Vtot = sum(V);
+    const scalar Vtot = gSum(V);
     scalar sumSq = 0;
     forAll(snapshots, i)
     {
-        sumSq += sum(magSqr(snapshots[i].primitiveField()) * V) / Vtot;
+        sumSq += gSum(magSqr(snapshots[i].primitiveField()) * V) / Vtot;
     }
     return Foam::sqrt(sumSq / snapshots.size());
 }

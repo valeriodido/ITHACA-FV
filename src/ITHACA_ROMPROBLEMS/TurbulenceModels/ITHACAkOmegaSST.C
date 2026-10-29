@@ -100,6 +100,9 @@ namespace ITHACATurbulenceModels
         {
             omegaRef = minPositive(omega0Fields[i], omegaRef);
         }
+        // Same bounds on every processor
+        reduce(kRef, minOp<scalar>());
+        reduce(omegaRef, minOp<scalar>());
         if (kRef < GREAT)
         {
             kMin_.value() = max(SMALL, boundFactor * kRef);
