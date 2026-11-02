@@ -1,6 +1,7 @@
 #include "ReducedLSPGUnsteadyBBTurb.H"
 #include "Foam2Eigen.H" // Needed to convert OpenFOAM fields to Eigen vectors and matrices
 #include "ITHACAassign.H"
+#include "MatrixResidual.H"
 
 
 ReducedLSPGUnsteadyBBTurb::ReducedLSPGUnsteadyBBTurb(
@@ -200,9 +201,9 @@ Eigen::VectorXd ReducedLSPGUnsteadyBBTurb::assembleResidual(
         mesh.magSf());
     UEqn -= Usrc;
 
-    const Field<vector> Ru = UEqn.residual();
-    const Field<scalar> RT = TEqn.residual();
-    const Field<scalar> Rp = p_rghEqn.residual();
+    const Field<vector> Ru = matrixResidual(UEqn);
+    const Field<scalar> RT = matrixResidual(TEqn);
+    const Field<scalar> Rp = matrixResidual(p_rghEqn);
 
     if (writeResidual)
     {
@@ -232,9 +233,9 @@ Eigen::VectorXd ReducedLSPGUnsteadyBBTurb::residualWithCurrentFields()
         mesh.magSf());
     UEqn -= Usrc;
 
-    const Field<vector> Ru = UEqn.residual();
-    const Field<scalar> RT = TEqn.residual();
-    const Field<scalar> Rp = p_rghEqn.residual();
+    const Field<vector> Ru = matrixResidual(UEqn);
+    const Field<scalar> RT = matrixResidual(TEqn);
+    const Field<scalar> Rp = matrixResidual(p_rghEqn);
 
     residualWorkspace_.set(iU_, Foam2Eigen::field2Eigen(Ru));
     residualWorkspace_.set(iP_, Foam2Eigen::field2Eigen(Rp));

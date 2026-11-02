@@ -206,12 +206,19 @@ void ReducedLSPG::runOnline(const word& folder)
         timeStepCompleted();
         Info << endl;
 
+        // The norms are reductions over the processors: computed on every processor, written by the master
+        const scalar finalNorm = residual_.norm();
+        scalarList blockNorms(reportedBlocks_.size());
+        forAll(reportedBlocks_, i)
+        {
+            blockNorms[i] = reportedBlockNorm(i);
+        }
         if (Pstream::master())
         {
-            residualLog << runTime.value() << " " << result.initialNorm << " " << residual_.norm();
-            forAll(reportedBlocks_, i)
+            residualLog << runTime.value() << " " << result.initialNorm << " " << finalNorm;
+            for (const scalar norm : blockNorms)
             {
-                residualLog << " " << reportedBlockNorm(i);
+                residualLog << " " << norm;
             }
             residualLog << " " << result.iterations << " " << lm.nfev() << " " << lm.gnorm() << " "
                         << status << std::endl;

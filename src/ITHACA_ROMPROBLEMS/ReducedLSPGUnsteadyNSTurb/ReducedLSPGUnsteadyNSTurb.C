@@ -1,5 +1,6 @@
 #include "ReducedLSPGUnsteadyNSTurb.H"
 #include "IncompressibleNSEquations.H"
+#include "MatrixResidual.H"
 #include "ITHACAcoeffsMass.H"
 #include "ITHACAassign.H"
 #include <cctype>
@@ -550,7 +551,7 @@ Eigen::VectorXd ReducedLSPGUnsteadyNSTurb::residualWithCurrentFields(const bool 
 
     collector_.begin(writeResidual);
 
-    const scalarField Rp(ps.pEqn().residual());
+    const scalarField Rp(matrixResidual(ps.pEqn()));
     collector_.add(iP_, ps.pEqn(), Rp);
 
     // Face-flux residual (He et al. 2021, eq. 1.8): the reconstructed flux against the Rhie-Chow flux
@@ -562,13 +563,13 @@ Eigen::VectorXd ReducedLSPGUnsteadyNSTurb::residualWithCurrentFields(const bool 
     }
 
     UEqn += fvc::grad(p);
-    const vectorField Ru(UEqn.residual());
+    const vectorField Ru(matrixResidual(UEqn));
     collector_.add(iU_, UEqn, Ru);
 
     PtrList<fvScalarMatrix> turbEqs = turbulence_->assembleEquations(fvOptions());
     forAll(turbEqs, i)
     {
-        const scalarField R(turbEqs[i].residual());
+        const scalarField R(matrixResidual(turbEqs[i]));
         collector_.add(iTurbulence_[i], turbEqs[i], R);
     }
 

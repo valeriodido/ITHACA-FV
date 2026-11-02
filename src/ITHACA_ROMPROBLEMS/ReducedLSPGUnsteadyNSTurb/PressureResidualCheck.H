@@ -37,6 +37,7 @@ Description
 #include "fvCFD.H"
 #include "IOMRFZoneList.H"
 #include "IncompressibleNSEquations.H"
+#include "MatrixResidual.H"
 #include <ostream>
 #include <string>
 
@@ -46,7 +47,7 @@ namespace PressureResidualCheck
 //- Per-cell terms of the pressure residual, volume-integrated (units of pEqn.source())
 struct Terms
 {
-    //- pEqn.residual(), as in the ROM
+    //- matrixResidual(pEqn), as in the ROM
     scalarField R;
     //- fvc::laplacian(rAU, p) V
     scalarField lap;
@@ -78,7 +79,7 @@ inline Terms compute(
     const fvScalarMatrix& pEqn = ps.pEqn();
 
     Terms t;
-    t.R = pEqn.residual();
+    t.R = matrixResidual(pEqn);
     t.lap = fvc::laplacian(ps.rAU, p)().primitiveField() * V;
     t.divHbyA = fvc::div(fvc::flux(ps.HbyA))().primitiveField() * V;
     t.divDdtCorr = fvc::div(ps.ddtCorrFlux)().primitiveField() * V;
