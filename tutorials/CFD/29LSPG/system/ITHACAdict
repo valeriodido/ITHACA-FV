@@ -34,7 +34,7 @@ snapshotNormalization run;
 // LSPG residual
 fluxResidual        false;       // He et al. 2021 eq. 1.8: residual phi - (phiHbyA - pEqn.flux()) on internal faces
 jacobianStep        1e-5;        // finite-difference step, h_j = jacobianStep * max(|y_j|, 1)
-jacobianOrder       2;           // 1: forward differences (n + 1 residual evaluations, error O(h)); 2: central (2n, error O(h^2))
+jacobianOrder       1;           // 1: forward differences (n + 1 residual evaluations, error O(h)); 2: central (2n, error O(h^2))
 writeResidualFields false;       // residual_{U,p,k,omega,phi} at every ROM time step, in the ROM case folder
 residualPreconditioner jacobi;   // none: 1/sqrt(V) rows, t0-calibrated block weights | jacobi: rows / matrix diagonal (preconditioned LSPG)
 // preconditionerScales (1 1 1e-1 5e-1);  // optional (U p k omega) scales of the jacobi blocks; default: RMS of the training snapshots
