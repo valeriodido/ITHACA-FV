@@ -185,7 +185,7 @@ void ReducedLSPG::runOnline(const word& folder)
         collector_.requestPreconditionerUpdate();
         const LMStepResult result = lm.solve(scaledState);
         const std::string status = lmStatusToString(result.status);
-        if (result.status == Eigen::LevenbergMarquardtSpace::Running)
+        if (result.status == LMStatus::Running)
         {
             Info << "LM reached maximum iterations (" << lmSettings_.maxIterations << ") without converging." << nl;
         }
@@ -202,7 +202,7 @@ void ReducedLSPG::runOnline(const word& folder)
         printBlockNorms();
         Info << "  - Initial residual norm: " << result.initialNorm << nl
              << "  - Final residual norm: " << residual_.norm() << nl
-             << "  - Function evaluations: " << lm.nfev() << nl;
+             << "  - Function evaluations: " << lm.nfev() << " (" << lm.njev() << " Jacobians)" << nl;
         timeStepCompleted();
         Info << endl;
 

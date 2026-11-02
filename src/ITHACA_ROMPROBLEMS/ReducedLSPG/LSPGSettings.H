@@ -90,8 +90,13 @@ struct LMSolverSettings {
     scalar gradientTol = 1e-4;
     //- ftol: relative reduction of |r|^2, actual and predicted
     scalar reductionTol = 1e-6;
-    //- xtol: trust-region radius relative to |y| (scaled by the Jacobian column norms); 0 disables it
+    //- xtol: step size relative to |y|; 0 disables it
     scalar stepTol = 0;
+    //- Jacobian reuse (jacobianReuse adaptive): the Jacobian is kept across iterations and time steps, with
+    //  Broyden updates, and recomputed when a step fails or is poor, or before convergence is declared
+    bool reuseJacobian = false;
+    //- With reuse: an accepted step whose actual to predicted reduction is below refreshRatio recomputes the Jacobian
+    scalar refreshRatio = 0.25;
 
     static LMSolverSettings read(const dictionary& dict);
 };

@@ -89,6 +89,21 @@ void BlockResidual::setBlockRowWeights(int block_index, const Eigen::VectorXd& r
     isScaled_ = false;
 }
 
+Eigen::VectorXd BlockResidual::rowScaling() const
+{
+    Eigen::VectorXd s(raw_.size());
+    for (const Block& block : blocks_)
+    {
+        auto seg = s.segment(block.offset, block.size);
+        seg.setConstant(block.weight);
+        if (block.rowWeights.size() > 0)
+        {
+            seg.array() *= block.rowWeights.array();
+        }
+    }
+    return s;
+}
+
 double BlockResidual::blockWeight(int block_index) const
 {
     return at(block_index).weight;

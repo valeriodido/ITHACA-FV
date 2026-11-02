@@ -116,6 +116,10 @@ class BlockResidual
 
     /// @brief Calibrates the weights as 1/||block||, with the block norms over all the processors
     void calibrateWeights(double minRelative=1e-8);
+
+    /// @brief Weight of every row of the residual (block weight, row weights): the scaled residual is
+    /// rowScaling() * raw
+    Eigen::VectorXd rowScaling() const;
     // Hyper-reduction will go here
 
   private:

@@ -57,6 +57,10 @@ LMSolverSettings LMSolverSettings::read(const dictionary& dict)
     s.gradientTol = dict.getOrDefault<scalar>("gradientTol", s.gradientTol);
     s.reductionTol = dict.getOrDefault<scalar>("reductionTol", s.reductionTol);
     s.stepTol = dict.getOrDefault<scalar>("stepTol", s.stepTol);
+    const word reuse = dict.getOrDefault<word>("jacobianReuse", "none");
+    M_Assert(reuse == "none" || reuse == "adaptive", "lmSolver: jacobianReuse must be 'none' or 'adaptive'.");
+    s.reuseJacobian = reuse == "adaptive";
+    s.refreshRatio = dict.getOrDefault<scalar>("refreshRatio", s.refreshRatio);
     M_Assert(s.maxIterations > 0, "lmSolver: maxIterations must be positive.");
     M_Assert(s.gradientTol >= 0 && s.reductionTol >= 0 && s.stepTol >= 0,
         "lmSolver: the tolerances must be non-negative.");

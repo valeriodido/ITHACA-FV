@@ -116,6 +116,12 @@ public:
         return residual_.norm();
     }
 
+    /// @brief Weight of every row of the residual minimised by LM (BlockResidual::rowScaling)
+    Eigen::VectorXd residualRowScaling() const
+    {
+        return residual_.rowScaling();
+    }
+
     /// @brief Block weights currently applied to the reported blocks of the residual (0 for an absent block)
     Eigen::VectorXd residualBlockWeights() const;
 

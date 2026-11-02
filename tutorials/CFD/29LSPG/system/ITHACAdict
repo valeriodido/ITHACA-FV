@@ -131,10 +131,14 @@ consistencyTest
 // convergence is stationarity, |J_j^T r| / (|J_j| |r|) <= gradientTol for every reduced coordinate j
 lmSolver
 {
-    maxIterations   10;                  // LM iterations (Jacobian evaluations) per time step
+    maxIterations   10;                  // LM iterations (damped least-squares steps) per time step
     gradientTol     1e-6;                // gtol, status CosinusTooSmall
     reductionTol    1e-6;                // ftol, relative reduction of |r|^2, status RelativeReductionTooSmall
-    stepTol         0;                   // xtol, relative trust-region radius, status RelativeErrorTooSmall; 0 = off
+    stepTol         0;                   // xtol, relative step size, status RelativeErrorTooSmall; 0 = off
+    jacobianReuse   none;                // none: finite-difference Jacobian at every accepted step
+                                         // adaptive: kept across iterations and time steps (Broyden updates),
+                                         // recomputed when a step is rejected or poor, and before a stop
+    refreshRatio    0.25;                // adaptive: recompute after a step with actual/predicted reduction below this
 }
 
 // Solver diagnostics, run when the LM solve of a time step stops with one of the trigger statuses.

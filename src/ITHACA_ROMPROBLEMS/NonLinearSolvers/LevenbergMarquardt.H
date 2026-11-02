@@ -24,10 +24,9 @@ License
 Class
     LevenbergMarquardt
 Description
-    Class holding the functor to enable usage of Eigen's Levenberg-Marquardt 
-    algorithm for solving non-linear least squares problems.
+    Functor of the LSPG residual and its finite-difference Jacobian, and the Levenberg-Marquardt solve of a time
+    step (LMDriver), with optional reuse of the Jacobian.
     Used in the solution of Least Squares Petrov-Galerkin (LSPG) reduced order models.
-    TODO: Check MPI parallelization
 SourceFiles
     LevenbergMarquardt.H
 \*---------------------------------------------------------------------------*/
@@ -117,21 +116,49 @@ struct LevenbergMarquardtFunctor
   }
 };
 
-/// @brief Converts the Levenberg-Marquardt status enum to a string representation.
+/// @brief Stop of the LM solve of a time step. The names are the ones of Eigen's Levenberg-Marquardt
+enum class LMStatus
+{
+  //- Maximum number of iterations reached
+  Running,
+  //- gtol: every Jacobian column is nearly orthogonal to the residual (stationarity)
+  CosinusTooSmall,
+  //- ftol: relative reduction of |r|^2 below reductionTol
+  RelativeReductionTooSmall,
+  //- xtol: step below stepTol relative to |y|
+  RelativeErrorTooSmall,
+  //- No step reduces the residual, even with the largest damping
+  XtolTooSmall
+};
+
+/// @brief Converts the LM status to a string representation.
+std::string lmStatusToString(LMStatus status);
+
+/// @brief Converts the status of Eigen's Levenberg-Marquardt to a string representation.
 std::string lmStatusToString(Eigen::LevenbergMarquardtSpace::Status status);
 
 /// @brief Outcome of the LM solve of one time step
 struct LMStepResult
 {
-  Eigen::LevenbergMarquardtSpace::Status status;
-  //- LM iterations (Jacobian evaluations)
+  LMStatus status = LMStatus::Running;
+  //- LM iterations (linear solves of the damped normal equations)
   int iterations = 0;
   //- Residual norm at the initial guess
   double initialNorm = 0;
 };
 
 /// @brief Levenberg-Marquardt solve of the LSPG problem of a time step, with the stopping criteria of
-/// LMSolverSettings. The same object is reused for every time step
+/// LMSolverSettings. The same object is reused for every time step.
+///
+/// Each iteration solves the damped normal equations (J^T J + lambda diag(J^T J)) d = -J^T r (Marquardt scaling),
+/// and accepts the step if it reduces |r|; the damping follows Nielsen's update. J^T J, J^T r and |r| are summed
+/// over the processors, so every processor takes the same steps.
+///
+/// Jacobian reuse (LMSolverSettings::reuseJacobian): the finite-difference Jacobian is kept across iterations and
+/// time steps (with the rows rescaled to the current residual weights), updated by Broyden's rank-1 formula after
+/// every accepted step, and recomputed when a step is rejected, when the ratio of actual to predicted reduction
+/// is below refreshRatio, and when a stopping criterion is met on a reused Jacobian: a solve only stops on a fresh
+/// Jacobian, which is the Jacobian at the initial guess of the next time step.
 class LMDriver
 {
 public:
@@ -140,24 +167,34 @@ public:
   LMDriver(const LMDriver&) = delete;
   LMDriver& operator=(const LMDriver&) = delete;
 
-  /// @brief Minimises the residual from the initial guess y (scaled coordinates), y is the solution on return.
-  /// Every stop other than Running is decided inside LM: gtol (stationarity, checked on the Jacobian at
-  /// the current point before stepping), ftol (reduction) or xtol (trust region), or a failure status
+  /// @brief Minimises the residual from the initial guess y (scaled coordinates), y is the solution on return
   LMStepResult solve(Eigen::VectorXd& y);
 
   const LevenbergMarquardtFunctor& functor() const { return functor_; }
 
-  //- Function evaluations of the last solve
-  Eigen::Index nfev() const { return lm_.nfev; }
+  //- Residual evaluations of the last solve, finite-difference Jacobians included
+  Eigen::Index nfev() const { return nfev_; }
 
-  //- Gradient cosine at the last Jacobian evaluation
-  double gnorm() const { return lm_.gnorm; }
+  //- Finite-difference Jacobians of the last solve
+  Eigen::Index njev() const { return njev_; }
+
+  //- Gradient cosine at the last iteration
+  double gnorm() const { return gnorm_; }
 
 private:
+  //- Finite-difference Jacobian at y, with the current residual weights
+  void computeJacobian(const Eigen::VectorXd& y);
+
   LevenbergMarquardtFunctor functor_;
-  //- Holds a reference to functor_
-  Eigen::LevenbergMarquardt<LevenbergMarquardtFunctor> lm_;
-  label maxIterations_;
+  const LMSolverSettings settings_;
+  //- Jacobian of the weighted residual, and whether it was computed at the current point
+  Eigen::MatrixXd J_;
+  bool fresh_ = false;
+  //- Residual weights of the rows of J_
+  Eigen::VectorXd rowScaling_;
+  Eigen::Index nfev_ = 0;
+  Eigen::Index njev_ = 0;
+  double gnorm_ = 0;
 };
 
 #endif
