@@ -25,9 +25,9 @@ Class
     LMDiagnostics
 Description
     Solver diagnostics of the LSPG ROM of the incompressible turbulent flow, run when the
-    Levenberg-Marquardt solve of a time step stops with one of the trigger statuses (ITHACAdict,
+    nonlinear least-squares solve of a time step stops with one of the trigger statuses (ITHACAdict,
     lmDiagnostics). See LMDiagnostics.C for what is written and how to read it.
-    The diagnostics only evaluate the residual through the LM functor, and read the face flux and the
+    The diagnostics only evaluate the residual through the least-squares problem, and read the face flux and the
     cells clipped by the closure: they do not depend on the internals of the ROM.
 SourceFiles
     LMDiagnostics.C
@@ -39,16 +39,17 @@ SourceFiles
 #include "fvCFD.H"
 #include "BlockResidual.H"
 #include "LSPGSettings.H"
-#include "LevenbergMarquardt.H"
+#include "NLSInterfaces.H"
+#include "NLSSettings.H"
 #include <functional>
 
 class LMDiagnostics
 {
 public:
-    /// @param residual Residual filled by the functor evaluations
+    /// @param residual Residual filled by the evaluations of the problem
     /// @param blocks Blocks of the tables (-1: absent, reported as 0), with their names
     /// @param coordinateLabels Name of each reduced coordinate
-    /// @param phi Face flux of the ROM, set by the functor evaluations
+    /// @param phi Face flux of the ROM, set by the evaluations of the problem
     /// @param clippedCells Cells clipped by the closure at the last evaluation, one mask per transported field
     LMDiagnostics(
         const LMDiagnosticsSettings& settings,
@@ -65,15 +66,16 @@ public:
         nDumps_ = 0;
     }
 
-    //- Whether the LM status of a time step triggers a diagnostic dump
+    //- Whether the status of the solve of a time step triggers a diagnostic dump
     bool triggered(const std::string& status) const;
 
-    //- Diagnoses the reduced problem at the point y where LM stopped. Writes in folder/lmDiagnostics/<time>/:
+    //- Diagnoses the reduced problem at the point y where the solver stopped. Writes in folder/lmDiagnostics/<time>/:
     //  the singular values of the Jacobian, residual scans along the Gauss-Newton and steepest-descent
     //  directions and along every reduced coordinate (kinks, jumps), the counts of k/omega cells crossing
     //  the clipping bound and of faces where phi changes sign, and a summary with a heuristic interpretation
     void run(
-        const LevenbergMarquardtFunctor& functor,
+        ITHACAnls::LeastSquaresProblem& problem,
+        const ITHACAnls::NLSSettings& settings,
         const Eigen::VectorXd& y,
         const std::string& status,
         const word& folder,

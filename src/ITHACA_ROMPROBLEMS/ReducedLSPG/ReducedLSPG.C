@@ -29,7 +29,7 @@ SourceFiles
     ReducedLSPG.C
 \*---------------------------------------------------------------------------*/
 #include "ReducedLSPG.H"
-#include "LevenbergMarquardt.H"
+#include "NLSProblems.H"
 #include "ITHACAassert.H"
 #include "ITHACAsystem.H"
 #include "Foam2Eigen.H"
@@ -63,10 +63,28 @@ ReducedLSPG::ReducedLSPG(std::shared_ptr<ITHACAcontext> context): context_(check
             IOobject::NO_WRITE)));
     romSettings_ = ROMSettings::read(*ITHACAdict);
     affineSettings_ = AffineReferenceSettings::read(*ITHACAdict);
-    lmSettings_ = LMSolverSettings::read(ITHACAdict->subOrEmptyDict("lmSolver"));
-    Info << "### LM stopping criteria: gradientTol " << lmSettings_.gradientTol << ", reductionTol "
-         << lmSettings_.reductionTol << ", stepTol " << lmSettings_.stepTol << ", maxIterations "
-         << lmSettings_.maxIterations << endl;
+    for (const word& key : wordList({ "jacobianStep", "jacobianOrder", "lmSolver" }))
+    {
+        if (ITHACAdict->found(key))
+        {
+            WarningInFunction << "ITHACAdict: '" << key << "' is not used any more, set the options of the "
+                              << "nonlinear solver in the nonlinearSolver dictionary" << endl;
+        }
+    }
+    nlsSettings_ = ITHACAnls::NLSSettings::read(ITHACAdict->subOrEmptyDict("nonlinearSolver"));
+    Info << "### Nonlinear solver: " << nlsSettings_.type << ", linearAlgebra " << nlsSettings_.linearAlgebra;
+    if (nlsSettings_.type == "gaussNewton")
+    {
+        Info << ", lineSearch " << nlsSettings_.lineSearch;
+    } else
+    {
+        Info << ", damping " << nlsSettings_.damping;
+    }
+    Info << ", jacobian " << nlsSettings_.jacobian << " (order " << nlsSettings_.jacobianOrder << ", step "
+         << nlsSettings_.jacobianStep << ")" << nl
+         << "    stopping criteria: gradientTol " << nlsSettings_.gradientTol << ", reductionTol "
+         << nlsSettings_.reductionTol << ", stepTol " << nlsSettings_.stepTol << ", maxIterations "
+         << nlsSettings_.maxIterations << endl;
 
     collector_.setPreconditioner(romSettings_.residualPreconditioner);
     nCells = mesh().nCells();
@@ -162,13 +180,13 @@ void ReducedLSPG::runOnline(const word& folder)
         {
             residualLog << " " << name;
         }
-        residualLog << " lmIterations nfev gradientCosine status" << std::endl;
+        residualLog << " iterations nfev gradientCosine status" << std::endl;
     }
 
-    // The functor provides its own finite-difference Jacobian (LevenbergMarquardtFunctor::df)
-    // At the moment i don't think this is a big advantage over Eigen's df, but it allows a bit
-    // more freedom in the future.
-    LMDriver lm(this, currentCoords_.size(), residual_.size(), lmSettings_);
+    // The nonlinear least-squares solver of every time step, selected by ITHACAdict (nonlinearSolver). The problem
+    // must outlive the solver
+    ITHACAnls::ReducedLSPGProblem lsProblem(*this, currentCoords_.size(), residual_.size());
+    const std::unique_ptr<ITHACAnls::NonlinearLSSolver> nls = ITHACAnls::NonlinearLSSolver::New(lsProblem, nlsSettings_);
 
     const scalar writeInterval = runTime.controlDict().get<scalar>("writeInterval");
     scalar nextWrite = runTime.value() + writeInterval;
@@ -181,18 +199,18 @@ void ReducedLSPG::runOnline(const word& folder)
         updateBoundaryConditions(runTime.time().value());
 
         Eigen::VectorXd scaledState = currentCoords_.cwiseQuotient(stateScaling_);
-        // The first residual evaluation of the solve builds the preconditioner of the time step
-        collector_.requestPreconditionerUpdate();
-        const LMStepResult result = lm.solve(scaledState);
-        const std::string status = lmStatusToString(result.status);
-        if (result.status == LMStatus::Running)
+        // The solver asks for the preconditioner of the time step at the beginning of the solve
+        const ITHACAnls::NLSResult result = nls->solve(scaledState);
+        const std::string status = ITHACAnls::toString(result.status);
+        if (result.status == ITHACAnls::NLSStatus::MaxIterations)
         {
-            Info << "LM reached maximum iterations (" << lmSettings_.maxIterations << ") without converging." << nl;
+            Info << "The solver reached maximum iterations (" << nlsSettings_.maxIterations
+                 << ") without converging." << nl;
         }
-        Info << "LM stopped after " << result.iterations << " iterations (status = " << status
-             << ", gradient cosine = " << lm.gnorm() << ")" << nl;
+        Info << "The solver stopped after " << result.iterations << " iterations (status = " << status
+             << ", gradient cosine = " << nls->gradientNorm() << ")" << nl;
 
-        diagnoseSolve(lm.functor(), scaledState, status, folder);
+        diagnoseSolve(lsProblem, nlsSettings_, scaledState, status, folder);
 
         currentCoords_ = scaledState.cwiseProduct(stateScaling_);
         currentState_ = fullState(scaledState);
@@ -202,7 +220,7 @@ void ReducedLSPG::runOnline(const word& folder)
         printBlockNorms();
         Info << "  - Initial residual norm: " << result.initialNorm << nl
              << "  - Final residual norm: " << residual_.norm() << nl
-             << "  - Function evaluations: " << lm.nfev() << " (" << lm.njev() << " Jacobians)" << nl;
+             << "  - Function evaluations: " << nls->nfev() << " (" << nls->njev() << " Jacobians)" << nl;
         timeStepCompleted();
         Info << endl;
 
@@ -220,7 +238,7 @@ void ReducedLSPG::runOnline(const word& folder)
             {
                 residualLog << " " << norm;
             }
-            residualLog << " " << result.iterations << " " << lm.nfev() << " " << lm.gnorm() << " "
+            residualLog << " " << result.iterations << " " << nls->nfev() << " " << nls->gradientNorm() << " "
                         << status << std::endl;
         }
 

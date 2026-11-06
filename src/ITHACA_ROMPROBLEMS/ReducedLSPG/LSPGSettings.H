@@ -52,11 +52,6 @@ struct ROMSettings {
     bool debug = false;
     bool writeResidualFields = false;
 
-    //- Relative finite-difference step for the Jacobian, h_j = jacobianStep * max(|y_j|, 1)
-    scalar jacobianStep = 1e-5;
-    //- Order of the finite-difference Jacobian: 1 forward (n + 1 residual evaluations), 2 central (2n)
-    label jacobianOrder = 2;
-
     ResidualPreconditionerType residualPreconditioner = ResidualPreconditionerType::None;
 
     static ROMSettings read(const dictionary& dict);
@@ -82,23 +77,6 @@ struct AffineReferenceSettings {
     label idwNeighbours = 0;
 
     static AffineReferenceSettings read(const dictionary& dict);
-};
-
-struct LMSolverSettings {
-    label maxIterations = 10;
-    //- gtol: largest cosine between the residual and a Jacobian column, |J_j^T r| / (|J_j| |r|)
-    scalar gradientTol = 1e-4;
-    //- ftol: relative reduction of |r|^2, actual and predicted
-    scalar reductionTol = 1e-6;
-    //- xtol: step size relative to |y|; 0 disables it
-    scalar stepTol = 0;
-    //- Jacobian reuse (jacobianReuse adaptive): the Jacobian is kept across iterations and time steps, with
-    //  Broyden updates, and recomputed when a step fails or is poor, or before convergence is declared
-    bool reuseJacobian = false;
-    //- With reuse: an accepted step whose actual to predicted reduction is below refreshRatio recomputes the Jacobian
-    scalar refreshRatio = 0.25;
-
-    static LMSolverSettings read(const dictionary& dict);
 };
 
 /// Settings of the solver diagnostics run when the LM solve of a time step fails (ITHACAdict, lmDiagnostics)

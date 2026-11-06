@@ -86,7 +86,14 @@ PtrList<FieldType> ITHACAcontext::loadFieldsFromCaseFolder
     fvMesh& mesh = _mesh();
     PtrList<FieldType> fields;
 
-    const fileName searchDir = folder.empty() ? runTime.path() : runTime.path()/folder;
+    // Serial: <case>/<folder>/<time>. Parallel: the decomposed fields of a folder are in <case>/<folder>/processorN/<time>
+    // (decomposePar run in the folder, the layout of ITHACAstream::read_fields and of the fields written by the
+    // reduced models), and not in <case>/processorN/<folder>/<time>, where the time of the processor would look
+    const bool inProcessorFolder = Pstream::parRun() && !folder.empty();
+    const fileName searchDir =
+        folder.empty() ? runTime.path()
+        : inProcessorFolder ? runTime.globalPath()/folder/("processor" + Foam::name(Pstream::myProcNo()))
+        : runTime.path()/folder;
 
     // Enumerate time-like subdirectories manually, since runTime.times()
     // only knows about the case root's own time directories
@@ -105,7 +112,10 @@ PtrList<FieldType> ITHACAcontext::loadFieldsFromCaseFolder
     for (const instant& time : times)
     {
         const word timeName = time.name();
-        const fileName instance = folder.empty() ? fileName(timeName) : folder/timeName;
+        const fileName instance =
+            folder.empty() ? fileName(timeName)
+            : inProcessorFolder ? searchDir/timeName
+            : folder/timeName;
 
         IOobject fieldIO
         (

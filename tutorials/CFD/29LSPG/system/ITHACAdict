@@ -33,8 +33,6 @@ snapshotNormalization run;
 
 // LSPG residual
 fluxResidual        false;       // He et al. 2021 eq. 1.8: residual phi - (phiHbyA - pEqn.flux()) on internal faces
-jacobianStep        1e-5;        // finite-difference step, h_j = jacobianStep * max(|y_j|, 1)
-jacobianOrder       1;           // 1: forward differences (n + 1 residual evaluations, error O(h)); 2: central (2n, error O(h^2))
 writeResidualFields false;       // residual_{U,p,k,omega,phi} at every ROM time step, in the ROM case folder
 residualPreconditioner jacobi;   // none: 1/sqrt(V) rows, t0-calibrated block weights | jacobi: rows / matrix diagonal (preconditioned LSPG)
 // preconditionerScales (1 1 1e-1 5e-1);  // optional (U p k omega) scales of the jacobi blocks; default: RMS of the training snapshots
@@ -127,28 +125,44 @@ consistencyTest
     }
 }
 
-// Stopping criteria of the LM solve of each time step. The LSPG residual does not vanish at the solution:
+// Nonlinear least-squares solver of each time step. The LSPG residual does not vanish at the solution:
 // convergence is stationarity, |J_j^T r| / (|J_j| |r|) <= gradientTol for every reduced coordinate j
-lmSolver
+nonlinearSolver
 {
-    maxIterations   10;                  // LM iterations (damped least-squares steps) per time step
+    type            levenbergMarquardt;  // levenbergMarquardt | gaussNewton
+    linearAlgebra   normalEquations;     // normalEquations | qr (TSQR of the distributed Jacobian, cond(J) instead of cond(J)^2)
+    jacobian        finiteDifference;    // finiteDifference
+    jacobianStep    1e-5;                // finite-difference step, h_j = jacobianStep * max(|y_j|, 1)
+    jacobianOrder   1;                   // 1: forward differences (n residual evaluations, error O(h)); 2: central (2n, error O(h^2))
+    jacobianReuse   none;                // none: the Jacobian is recomputed at every accepted step
+
+    // levenbergMarquardt only
+    damping         nielsen;             // nielsen
+    // lambda0      1e-3;                // initial damping of every solve
+    // lambdaMax    1e16;                // the solve stops (XtolTooSmall) when the damping exceeds this value
+    // acceptRatio  1e-4;                // a step is accepted if actual/predicted reduction is above this value
+
+    // gaussNewton only
+    // lineSearch   backtracking;        // fixed | backtracking (Armijo, each trial costs a residual evaluation)
+    // stepLength   1;                   // fixed: the step length
+    // armijoC1     1e-4;                // backtracking: sufficient decrease constant
+    // backtrackShrink 0.5;              // backtracking: step length factor after a failed trial
+    // maxBacktracks 20;
+
+    maxIterations   10;                  // iterations (steps, rejected ones included) per time step
     gradientTol     1e-6;                // gtol, status CosinusTooSmall
     reductionTol    1e-6;                // ftol, relative reduction of |r|^2, status RelativeReductionTooSmall
     stepTol         0;                   // xtol, relative step size, status RelativeErrorTooSmall; 0 = off
-    jacobianReuse   none;                // none: finite-difference Jacobian at every accepted step
-                                         // adaptive: kept across iterations and time steps (Broyden updates),
-                                         // recomputed when a step is rejected or poor, and before a stop
-    refreshRatio    0.25;                // adaptive: recompute after a step with actual/predicted reduction below this
 }
 
-// Solver diagnostics, run when the LM solve of a time step stops with one of the trigger statuses.
+// Solver diagnostics, run when the solve of a time step stops with one of the trigger statuses.
 // Written to <ROM folder>/lmDiagnostics/<time>/ (summary.log, singularValues.dat, direction_*.dat,
 // coordinates*.dat), with one line per dump in <ROM folder>/lmDiagnostics/index.dat.
 // Plot with: gnuplot -e "dump='ITHACAoutput/ROM/<romID>/<suffix>/lmDiagnostics/<time>'" lmDiagnostics.gp
 lmDiagnostics
 {
     enabled         true;
-    triggers        (XtolTooSmall);      // LM statuses that trigger a dump; Running = maximum iterations reached
+    triggers        (XtolTooSmall);      // statuses that trigger a dump; Running = maximum iterations reached
     maxDumps        3;                   // dumps per online solve
     steps           (1e-1 1e-2 1e-3 1e-4 1e-5 1e-6 1e-7 1e-8);  // scan steps, in scaled coordinates
     coordinateScan  true;                // 2 x (number of coordinates) x (number of steps) residual evaluations

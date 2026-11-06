@@ -47,12 +47,11 @@ SourceFiles
 #include "BlockResidual.H"
 #include "ResidualCollector.H"
 #include "LSPGSettings.H"
+#include "NonlinearLSSolver.H"
 #include "StateMap.H"
 #include "ITHACAstream.H"
 #include <Eigen/Dense>
 #include <memory>
-
-struct LevenbergMarquardtFunctor;
 
 class ReducedLSPG
 {
@@ -92,18 +91,6 @@ public:
         return stateMap_.expand(stateScaling_.cwiseProduct(y));
     }
 
-    /// @brief Returns the relative finite-difference step for the Jacobian
-    double jacobianStep() const
-    {
-        return romSettings_.jacobianStep;
-    }
-
-    /// @brief Returns the order of the finite-difference Jacobian (1 forward, 2 central)
-    label jacobianOrder() const
-    {
-        return romSettings_.jacobianOrder;
-    }
-
     /// @brief Returns the ID of the ROM
     const word& getID() const
     {
@@ -116,7 +103,7 @@ public:
         return residual_.norm();
     }
 
-    /// @brief Weight of every row of the residual minimised by LM (BlockResidual::rowScaling)
+    /// @brief Weight of every row of the residual minimised by the nonlinear solver (BlockResidual::rowScaling)
     Eigen::VectorXd residualRowScaling() const
     {
         return residual_.rowScaling();
@@ -125,10 +112,17 @@ public:
     /// @brief Block weights currently applied to the reported blocks of the residual (0 for an absent block)
     Eigen::VectorXd residualBlockWeights() const;
 
+    /// @brief The next residual evaluation rebuilds the preconditioner of the residual. Called by the nonlinear
+    /// solvers at the beginning of the solve of a time step
+    void requestResidualPreconditionerUpdate()
+    {
+        collector_.requestPreconditionerUpdate();
+    }
+
 protected:
     // *** Online solve *** //
 
-    /// @brief Time loop of the online solve, results in folder: one LM solve per time step from the
+    /// @brief Time loop of the online solve, results in folder: one nonlinear least-squares solve per time step from the
     /// current fields (initializePODCoeffsFromFields). The model sets its fields and boundary conditions before
     void runOnline(const word& folder);
 
@@ -144,9 +138,11 @@ protected:
     virtual void writeFields(const word& folder) const
     {}
 
-    //- Called when the LM solve of a time step stopped, at the solution y (scaled coordinates)
+    //- Called when the solve of a time step stopped, at the solution y (scaled coordinates). The problem is the
+    //  residual of the time step and settings are the ones of the solver (e.g. to build the same Jacobian)
     virtual void diagnoseSolve(
-        const LevenbergMarquardtFunctor& functor,
+        ITHACAnls::LeastSquaresProblem& problem,
+        const ITHACAnls::NLSSettings& settings,
         const Eigen::VectorXd& y,
         const std::string& status,
         const word& folder)
@@ -199,8 +195,8 @@ protected:
     /// @brief Settings of the affine reference of the fields
     AffineReferenceSettings affineSettings_;
 
-    /// @brief Stopping criteria of the LM solve
-    LMSolverSettings lmSettings_;
+    /// @brief Nonlinear least-squares solver of every time step (ITHACAdict, nonlinearSolver)
+    ITHACAnls::NLSSettings nlsSettings_;
 
     argList& args() const;
     fvMesh& mesh() const;
@@ -214,10 +210,10 @@ protected:
     /// Current state vector (field coefficients)
     Eigen::VectorXd currentState_;
 
-    /// Reduced coordinates solved for by LM (unscaled), currentState_ = stateMap_ * currentCoords_
+    /// Reduced coordinates solved for (unscaled), currentState_ = stateMap_ * currentCoords_
     Eigen::VectorXd currentCoords_;
 
-    /// State scaling vector, one entry per reduced coordinate: LM solves for y = c / stateScaling_
+    /// State scaling vector, one entry per reduced coordinate: the solver solves for y = c / stateScaling_
     Eigen::VectorXd stateScaling_;
 
     /// Maps the reduced coordinates onto the state (stacked POD)

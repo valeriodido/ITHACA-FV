@@ -29,7 +29,14 @@ ReducedLSPG/StateMap.C
 ReducedLSPG/JointProjector.C
 ReducedLSPG/AffineReference.C
 ReducedLSPG/ResidualCollector.C
-NonLinearSolvers/LevenbergMarquardt.C
+NonlinearLeastSquares/NLSSettings.C
+NonlinearLeastSquares/ParallelLinearAlgebra.C
+NonlinearLeastSquares/NLSStepSolvers.C
+NonlinearLeastSquares/NLSJacobians.C
+NonlinearLeastSquares/NLSStepLengths.C
+NonlinearLeastSquares/NonlinearLSSolver.C
+NonlinearLeastSquares/GaussNewtonSolver.C
+NonlinearLeastSquares/LevenbergMarquardtSolver.C
 TurbulenceModels/ResidualTurbulenceModel.C
 TurbulenceModels/ITHACAkOmegaSST.C
 

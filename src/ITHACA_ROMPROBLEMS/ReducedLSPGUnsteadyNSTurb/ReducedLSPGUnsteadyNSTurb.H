@@ -52,7 +52,6 @@ SourceFiles
 #include "JointProjector.H"
 #include "AffineReference.H"
 #include "BoundaryConditions.H"
-#include "LevenbergMarquardt.H"
 #include "LMDiagnostics.H"
 #include "PressureResidualCheck.H" // Used for residual diagnostics in the FOM evaluation of the ROM residual
 #include <Eigen/Dense>
@@ -161,9 +160,10 @@ private:
 
     void writeFields(const word& folder) const override;
 
-    //- Runs the LM diagnostics, if the status triggers them
+    //- Runs the solver diagnostics, if the status triggers them
     void diagnoseSolve(
-        const LevenbergMarquardtFunctor& functor,
+        ITHACAnls::LeastSquaresProblem& problem,
+        const ITHACAnls::NLSSettings& settings,
         const Eigen::VectorXd& y,
         const std::string& status,
         const word& folder) override;

@@ -48,7 +48,6 @@ SourceFiles
 #include "Modes.H"
 #include "BoundaryConditions.H"
 #include "RBFTurbulence.H"
-#include "LevenbergMarquardt.H"
 #include <Eigen/Dense>
 #include <memory>
 
@@ -63,12 +62,6 @@ struct NumberOfModes {
     int pressure = 0;
     int temperature = 0;
     int nut = 0;
-};
-
-struct GaussNewtonSettings {
-    int maxIter = 5;
-    float tol = 1e-2;
-    float stagnationTol = 1e-8;
 };
 
 struct DimensionParameters {

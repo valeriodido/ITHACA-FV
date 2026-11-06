@@ -637,6 +637,17 @@ bool haveFOMReference(const RunPaths& run)
     return false;
 }
 
+/// Exports a matrix computed identically on every processor: only the master writes the file (a file opened by
+/// all the processors at once is corrupted)
+void exportOnMaster(Eigen::MatrixXd& matrix, const word& name, const word& folder)
+{
+    if (Pstream::master())
+    {
+        ITHACAstream::exportMatrix(matrix, name, "eigen", folder);
+    }
+}
+
+
 /// Relative L2 error, at every written time, between the FOM field <fieldName> of the run and the ROM field
 /// <fieldName>_r. Written to errors/L2ErrorLSPG<fieldName>_mat.txt
 template <typename FieldType>
@@ -646,7 +657,7 @@ void compareWithFOM(const RunPaths& run, const word& fieldName, const std::share
     PtrList<FieldType> rom = context->loadFieldsFromCaseFolder<FieldType>(fieldName + "_r", run.romFolder());
 
     Eigen::MatrixXd l2Error = ITHACAutilities::errorL2Rel(fom, rom);
-    ITHACAstream::exportMatrix(l2Error, "L2ErrorLSPG" + fieldName, "eigen", run.errorFolder());
+    exportOnMaster(l2Error, "L2ErrorLSPG" + fieldName, run.errorFolder());
     Info << "-- " << fieldName << ": maximum L2 error " << l2Error.maxCoeff()
          << ", average L2 error " << l2Error.mean() << endl;
 }
@@ -674,8 +685,8 @@ void comparePressureWithoutMean(const RunPaths& run, const std::shared_ptr<ITHAC
     }
 
     Eigen::MatrixXd l2Error = ITHACAutilities::errorL2Rel(fomNoMean, romNoMean);
-    ITHACAstream::exportMatrix(l2Error, "L2ErrorLSPGp_meanRemoved", "eigen", run.errorFolder());
-    ITHACAstream::exportMatrix(meanOffset, "pMeanOffset", "eigen", run.errorFolder());
+    exportOnMaster(l2Error, "L2ErrorLSPGp_meanRemoved", run.errorFolder());
+    exportOnMaster(meanOffset, "pMeanOffset", run.errorFolder());
     Info << "-- p with the mean removed: maximum L2 error " << l2Error.maxCoeff()
          << ", average L2 error " << l2Error.mean() << nl
          << "-- Maximum |mean(p_ROM) - mean(p_FOM)|: " << meanOffset.cwiseAbs().maxCoeff() << endl;
@@ -726,7 +737,7 @@ void projectionError(
     }
 
     Eigen::MatrixXd l2Error = ITHACAutilities::errorL2Rel(fom, reconstructed);
-    ITHACAstream::exportMatrix(l2Error, "L2errorProj" + fieldName, "eigen", run.errorFolder());
+    exportOnMaster(l2Error, "L2errorProj" + fieldName, run.errorFolder());
 }
 
 

@@ -515,14 +515,15 @@ void ReducedLSPGUnsteadyNSTurb::writeFields(const word& folder) const
 
 
 void ReducedLSPGUnsteadyNSTurb::diagnoseSolve(
-    const LevenbergMarquardtFunctor& functor,
+    ITHACAnls::LeastSquaresProblem& problem,
+    const ITHACAnls::NLSSettings& settings,
     const Eigen::VectorXd& y,
     const std::string& status,
     const word& folder)
 {
     if (lmDiagnostics_->triggered(status))
     {
-        lmDiagnostics_->run(functor, y, status, folder, runTime().value());
+        lmDiagnostics_->run(problem, settings, y, status, folder, runTime().value());
     }
 }
 

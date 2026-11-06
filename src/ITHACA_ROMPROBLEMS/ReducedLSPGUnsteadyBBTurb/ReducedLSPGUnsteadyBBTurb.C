@@ -1,4 +1,5 @@
 #include "ReducedLSPGUnsteadyBBTurb.H"
+#include "NLSProblems.H"
 #include "Foam2Eigen.H" // Needed to convert OpenFOAM fields to Eigen vectors and matrices
 #include "ITHACAassign.H"
 #include "MatrixResidual.H"
@@ -109,7 +110,6 @@ void ReducedLSPGUnsteadyBBTurb::solveOnline(
     boundaryConditionsU_ = BoundaryConditions { bcROM, "linear" };
     boundaryConditionsT_ = BoundaryConditions { bcROMT, "linear" };
     Info << "Created boundary conditions objects for U and T" << endl;
-    const GaussNewtonSettings gn_settings = GaussNewtonSettings { 5, 1e-3, 1e-7 };
     Time& runTime = this->runTime();
 #include "readTimeControls.H"
 
@@ -122,14 +122,9 @@ void ReducedLSPGUnsteadyBBTurb::solveOnline(
          << "  - T residual norm " << residualWorkspace_.blockNorm(iT_) << endl;
     residualWorkspace_.calibrateWeights(1e-8);
 
-    LevenbergMarquardtFunctor lmFunctor(this, currentState_.size(), residualWorkspace_.size());
-    Eigen::NumericalDiff<LevenbergMarquardtFunctor> numDiff(lmFunctor);
-    Eigen::LevenbergMarquardt<Eigen::NumericalDiff<LevenbergMarquardtFunctor>> lm(numDiff);
-
-    lm.parameters.ftol = 1e-8;
-    lm.parameters.xtol = 1e-8;
-    lm.parameters.gtol = 1e-10;
-    lm.parameters.maxfev = 800;
+    // Nonlinear least-squares solver of every time step, selected by ITHACAdict (nonlinearSolver)
+    ITHACAnls::ReducedLSPGProblem lsProblem(*this, currentState_.size(), residualWorkspace_.size());
+    const std::unique_ptr<ITHACAnls::NonlinearLSSolver> nls = ITHACAnls::NonlinearLSSolver::New(lsProblem, nlsSettings_);
 
     auto start = std::chrono::high_resolution_clock::now();
     while (runTime.run())
@@ -140,27 +135,9 @@ void ReducedLSPGUnsteadyBBTurb::solveOnline(
         boundaryConditionsT_.updateTimeDependentBC(runTime.time().value());
 
         Eigen::VectorXd scaledState = currentState_.cwiseQuotient(stateScaling_);
-        Eigen::LevenbergMarquardtSpace::Status status = lm.minimizeInit(scaledState);
-
-        for (int gnIter = 0; gnIter < gn_settings.maxIter; gnIter++)
-        {
-            const double residualNorm = lm.fnorm;
-
-            if (residualNorm < gn_settings.tol)
-            {
-                Info << "LM converged at iteration " << gnIter << endl;
-                break;
-            }
-
-            status = lm.minimizeOneStep(scaledState);
-
-            if (status != Eigen::LevenbergMarquardtSpace::Running)
-            {
-                Info << "LM stopped internally at iteration " << gnIter
-                     << " (status = " << lmStatusToString(status) << ")" << endl;
-                break;
-            }
-        }
+        const ITHACAnls::NLSResult result = nls->solve(scaledState);
+        Info << "The solver stopped after " << result.iterations << " iterations (status = "
+             << ITHACAnls::toString(result.status).c_str() << ", " << nls->nfev() << " residual evaluations)" << endl;
 
         currentState_ = scaledState.cwiseProduct(stateScaling_);
         assembleResidual(currentState_);

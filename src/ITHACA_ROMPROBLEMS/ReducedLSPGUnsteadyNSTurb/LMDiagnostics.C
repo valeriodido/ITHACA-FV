@@ -42,6 +42,8 @@ Description
 \*---------------------------------------------------------------------------*/
 
 #include "LMDiagnostics.H"
+#include "NLSJacobians.H"
+#include "ParallelLinearAlgebra.H"
 #include "ITHACAassert.H"
 #include <Eigen/SVD>
 #include <fstream>
@@ -110,7 +112,7 @@ Eigen::MatrixXd globalTriangularFactor(const Eigen::MatrixXd& J)
     const Eigen::HouseholderQR<Eigen::MatrixXd> localQR(J);
     Eigen::MatrixXd stacked = Eigen::MatrixXd::Zero(Pstream::nProcs() * n, n);
     stacked.block(Pstream::myProcNo() * n, 0, k, n) = localQR.matrixQR().topRows(k).triangularView<Eigen::Upper>();
-    reduce(stacked, sumOp<Eigen::MatrixXd>());
+    ITHACAnls::sumOverProcessors(stacked);
     const Eigen::HouseholderQR<Eigen::MatrixXd> globalQR(stacked);
     return globalQR.matrixQR().topRows(n).triangularView<Eigen::Upper>();
 }
@@ -160,7 +162,7 @@ bool LMDiagnostics::triggered(const std::string& status) const
     }
     for (const word& trigger : settings_.triggers)
     {
-        // lmStatusToString may append the tolerance name, e.g. "RelativeReductionTooSmall (ftol)"
+        // The status may append the tolerance name, e.g. "RelativeReductionTooSmall (ftol)"
         if (status.rfind(trigger, 0) == 0)
         {
             return true;
@@ -171,7 +173,8 @@ bool LMDiagnostics::triggered(const std::string& status) const
 
 
 void LMDiagnostics::run(
-    const LevenbergMarquardtFunctor& functor,
+    ITHACAnls::LeastSquaresProblem& problem,
+    const ITHACAnls::NLSSettings& settings,
     const Eigen::VectorXd& y,
     const std::string& status,
     const word& folder,
@@ -205,7 +208,7 @@ void LMDiagnostics::run(
     {
         Evaluation e;
         e.r.resize(m);
-        functor(yy, e.r);
+        problem.residual(yy, e.r);
         e.clipped = clippedCells_();
         const scalarField& phiI = phi_.primitiveField();
         e.phiPositive.setSize(phiI.size());
@@ -235,7 +238,7 @@ void LMDiagnostics::run(
     std::ostringstream summary;
     summary << std::scientific << std::setprecision(3);
 
-    // ------------------------------------------------------------------ 1. Point where LM stopped
+    // ------------------------------------------------------------------ 1. Point where the solver stopped
     const Evaluation base = evaluate(y);
     const double r0 = globalNorm(base.r);
     const scalarField& phiBase = phi_.primitiveField();
@@ -266,8 +269,9 @@ void LMDiagnostics::run(
     summary << "\n\n";
 
     // ------------------------------------------------------------------ 2. Jacobian conditioning
-    Eigen::MatrixXd J(m, n);
-    functor.df(y, J);
+    // The Jacobian of the solver, at the point where it stopped
+    ITHACAnls::FiniteDifferenceJacobian jacobian(settings.jacobianStep, settings.jacobianOrder, m, n);
+    const Eigen::MatrixXd& J = jacobian.evaluate(problem, y, base.r);
     // In parallel J holds the rows of this processor: its R factor over all the processors has the same singular
     // values and right singular vectors as the global J
     const Eigen::MatrixXd R = Pstream::parRun() ? globalTriangularFactor(J) : Eigen::MatrixXd();
@@ -317,7 +321,7 @@ void LMDiagnostics::run(
     {
         // Least-squares Gauss-Newton step from the global J^T r: with R = U S V^T, d = -V S^-2 V^T J^T r
         // (directions with sigma < 1e-12 sigma_max are dropped)
-        reduce(dSD, sumOp<Eigen::VectorXd>());
+        ITHACAnls::sumOverProcessors(dSD);
         Eigen::VectorXd invS2 = Eigen::VectorXd::Zero(n);
         for (label i = 0; i < n; i++)
         {
